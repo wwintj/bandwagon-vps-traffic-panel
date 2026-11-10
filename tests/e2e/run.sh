@@ -69,7 +69,7 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.1.2"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.1.3"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"

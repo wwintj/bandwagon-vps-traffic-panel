@@ -58,12 +58,12 @@
                     <p class="font-mono text-blue-400 whitespace-nowrap tabular-nums" id="tx-speed"><span class="speed-num text-xl lg:text-lg xl:text-2xl">0</span><span class="speed-unit ml-1 text-xs xl:text-sm opacity-80">B/s</span></p>
                 </div>
             </div>
-            <div class="mt-4">
-                <div class="grid grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-2 text-[11px]">
-                    <span class="text-slate-500 whitespace-nowrap">月流量</span>
-                    <span id="traffic-quota-detail" class="text-slate-300 font-mono whitespace-nowrap">未設定</span>
-                    <div class="progress-track min-w-0"><div class="progress-fill bg-emerald-400" id="traffic-quota-bar"></div></div>
+            <div class="mt-4 text-[11px]">
+                <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span class="whitespace-nowrap text-slate-500">月流量 <span id="traffic-quota-percent" class="ml-1 font-mono font-semibold text-emerald-400"></span></span>
+                    <span id="traffic-quota-detail" class="ml-auto whitespace-nowrap font-mono text-slate-300">未設定</span>
                 </div>
+                <div id="traffic-quota-track" class="progress-track mt-1.5 hidden"><div class="progress-fill bg-emerald-400" id="traffic-quota-bar"></div></div>
             </div>
         </div>
         <div class="card border-t-4 border-t-violet-400">
@@ -401,11 +401,30 @@
 
         function renderTrafficQuota(quota) {
             quota = quota || {};
-            const quotaPercent = Math.max(0, Math.min(100, Number(quota.percent) || 0));
-            document.getElementById('traffic-quota-bar').style.width = `${quotaPercent}%`;
-            document.getElementById('traffic-quota-detail').innerText = quota.available
-                ? `${formatBytes(quota.used)} / ${formatBytes(quota.limit)} (${quotaPercent.toFixed(1)}%)`
-                : '未設定';
+            const track = document.getElementById('traffic-quota-track');
+            const bar = document.getElementById('traffic-quota-bar');
+            const percentEl = document.getElementById('traffic-quota-percent');
+            const detail = document.getElementById('traffic-quota-detail');
+            if (!quota.available) {
+                track.classList.add('hidden');
+                percentEl.textContent = '';
+                detail.textContent = '未設定';
+                detail.title = quota.error || '';
+                return;
+            }
+            // Real percentage in the label (can exceed 100%), bar capped at full width.
+            const percent = Math.max(0, Number(quota.percent) || 0);
+            const tone = percent >= 90 ? ['bg-red-400', 'text-red-400']
+                : percent >= 70 ? ['bg-amber-400', 'text-amber-400']
+                : ['bg-emerald-400', 'text-emerald-400'];
+            track.classList.remove('hidden');
+            // Keep a sliver visible once anything is used, so 0.3% doesn't look like an empty bar.
+            bar.style.width = `${Number(quota.used) > 0 ? Math.min(100, Math.max(percent, 1)) : 0}%`;
+            bar.className = `progress-fill ${tone[0]}`;
+            percentEl.className = `ml-1 font-mono font-semibold ${tone[1]}`;
+            percentEl.textContent = `${percent.toFixed(1)}%`;
+            detail.textContent = `${formatBytes(quota.used)} / ${formatBytes(quota.limit)}`;
+            detail.title = quota.source_label ? `數據來源：${quota.source_label}` : '';
         }
 
         function formatCoordinates(lat, lon) {
