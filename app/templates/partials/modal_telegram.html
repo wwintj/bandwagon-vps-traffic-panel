@@ -1,0 +1,46 @@
+    <div id="telegram-modal" class="modal-backdrop">
+        <div class="card w-full max-w-lg max-h-[92vh] overflow-y-auto">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">Telegram 推送設定</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="telegram-status">每天按所選時區推送一次流量摘要；今日 / 本期統計也按此時區切日</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="telegram-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <label class="flex items-center gap-2 text-sm text-slate-300">
+                    <input id="telegram-enabled" type="checkbox" class="h-4 w-4 accent-cyan-400">
+                    啟用每日推送
+                </label>
+                <label class="block text-xs text-slate-400 uppercase">Bot Token
+                    <input id="telegram-token" type="password" class="form-input" autocomplete="off">
+                </label>
+                <label class="block text-xs text-slate-400 uppercase">用戶 ID / Chat ID
+                    <input id="telegram-chat-id" class="form-input" autocomplete="off">
+                </label>
+                <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_5rem_5rem] gap-4">
+                    <label class="block text-xs text-slate-400 uppercase">面板時區（統計與推送）
+                        <select id="telegram-timezone" class="form-input font-mono"></select>
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">小時
+                        <select id="telegram-push-hour" class="form-input"></select>
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">分鐘
+                        <select id="telegram-push-minute" class="form-input"></select>
+                    </label>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <label class="block text-xs text-slate-400 uppercase">Bandwagon VEID
+                        <input id="bandwagon-veid" class="form-input" autocomplete="off">
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">Bandwagon API Key
+                        <input id="bandwagon-api-key" type="password" class="form-input" autocomplete="off">
+                    </label>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <button id="telegram-save" class="w-full rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-sm py-2.5 transition">保存設定</button>
+                    <button id="telegram-test" class="w-full rounded border border-sky-500/60 hover:border-sky-300 text-sky-200 font-bold text-sm py-2.5 transition">測試推送</button>
+                </div>
+            </div>
+        </div>
+    </div>

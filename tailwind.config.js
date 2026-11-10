@@ -2,7 +2,7 @@
 //   npx tailwindcss@3.4.16 -c tailwind.config.js -i app/static/src/panel.input.css -o app/static/panel.css --minify
 // CI fails if the committed panel.css is out of date.
 module.exports = {
-  content: ["./app/templates/**/*.html"],
+  content: ["./app/templates/**/*.html", "./app/static/panel.js"],
   theme: { extend: {} },
   plugins: [],
 };

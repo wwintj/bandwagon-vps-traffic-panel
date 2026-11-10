@@ -1,0 +1,20 @@
+    <div id="auth-modal" class="modal-backdrop">
+        <div class="card w-full max-w-md">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">修改登入資訊</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="auth-settings-status">密碼留空則只修改用戶名</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="auth-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <label class="block text-xs text-slate-400 uppercase">登入用戶名
+                    <input id="settings-username" class="form-input" autocomplete="username">
+                </label>
+                <label class="block text-xs text-slate-400 uppercase">新密碼（留空不修改）
+                    <input id="settings-password" type="password" class="form-input" autocomplete="new-password">
+                </label>
+                <button id="auth-settings-save" class="w-full rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-sm py-2.5 transition">保存登入資訊</button>
+            </div>
+        </div>
+    </div>

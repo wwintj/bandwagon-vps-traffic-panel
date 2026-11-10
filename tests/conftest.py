@@ -20,8 +20,10 @@ for key in ("AUTH_USERNAME", "AUTH_PASSWORD", "TELEGRAM_BOT_TOKEN", "CLOUDFLARE_
     os.environ.pop(key, None)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import app.main as main_module  # noqa: E402
+import app.main as main_module  # noqa: E402,F401  (imports the whole app)
+from appproxy import AppProxy  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -29,16 +31,19 @@ def data_dir():
     return _DATA_DIR
 
 
+APP = AppProxy()
+
+
 @pytest.fixture
 def m(monkeypatch):
     # No network in tests.
-    monkeypatch.setattr(main_module, "fetch_bandwagon_info_cached", lambda force=False: None)
-    monkeypatch.setattr(main_module, "fetch_bandwagon_info", lambda: None)
-    monkeypatch.setattr(main_module, "get_cached_public_ip_info", lambda force=False: ("1.2.3.4", {}))
-    monkeypatch.setattr(main_module, "lookup_ip_info", lambda ip: {})
-    main_module.init_db()
-    main_module.AUTH_FAILURES.clear()
-    return main_module
+    monkeypatch.setattr(APP, "fetch_bandwagon_info_cached", lambda force=False: None)
+    monkeypatch.setattr(APP, "fetch_bandwagon_info", lambda: None)
+    monkeypatch.setattr(APP, "get_cached_public_ip_info", lambda force=False: ("1.2.3.4", {}))
+    monkeypatch.setattr(APP, "lookup_ip_info", lambda ip: {})
+    APP.init_db()
+    APP.AUTH_FAILURES.clear()
+    return APP
 
 
 @pytest.fixture

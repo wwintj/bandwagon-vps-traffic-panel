@@ -1,0 +1,29 @@
+    <div id="ssl-modal" class="modal-backdrop">
+        <div class="card w-full max-w-lg max-h-[92vh] overflow-y-auto">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">SSL 證書</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="ssl-status-note">面板直接連線自己的 HTTPS 端口，讀出瀏覽器實際看到的證書</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="ssl-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <div class="rounded border border-slate-700 bg-slate-900/60 p-3 text-xs space-y-1.5" id="ssl-details"></div>
+                <label class="flex items-center gap-2 text-sm text-slate-300">
+                    <input id="ssl-expiry-notify" type="checkbox" class="h-4 w-4 accent-red-400">
+                    證書剩 14 / 7 天時發 Telegram 提醒，最後 3 天每天提醒
+                </label>
+                <p class="text-[11px] text-slate-500">Let's Encrypt 會在到期前約 30 天自動續簽；剩 14 天仍未續上，通常代表自動續簽失敗。</p>
+                <button id="ssl-refresh" class="w-full rounded border border-emerald-500/60 hover:border-emerald-300 text-emerald-200 font-bold text-sm py-2.5 transition">重新檢查</button>
+                <div class="border-t border-slate-700 pt-4 space-y-3" id="ssl-switch">
+                    <div class="flex items-center justify-between gap-3">
+                        <h3 class="text-sm font-bold text-slate-200">切換證書</h3>
+                        <button id="ssl-scan" class="shrink-0 rounded border border-sky-500/60 hover:border-sky-300 text-sky-200 text-xs font-bold px-3 py-1.5 transition">搜尋本機證書</button>
+                    </div>
+                    <p class="text-[11px] text-slate-500" id="ssl-switch-status">會搜尋 Let's Encrypt、acme.sh、x-ui / 3x-ui、Nginx 與常見目錄裡的證書。套用前會檢查私鑰、到期日與網域，套用後若面板沒有送出新證書會自動還原。</p>
+                    <div class="space-y-2" id="ssl-candidates"></div>
+                    <button id="ssl-apply" class="hidden w-full rounded bg-sky-500 hover:bg-sky-400 disabled:opacity-40 disabled:hover:bg-sky-500 text-slate-950 font-bold text-sm py-2.5 transition" disabled>套用選取的證書</button>
+                </div>
+            </div>
+        </div>
+    </div>

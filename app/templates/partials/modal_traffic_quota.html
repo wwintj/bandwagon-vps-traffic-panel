@@ -1,0 +1,44 @@
+    <div id="traffic-quota-modal" class="modal-backdrop">
+        <div class="card w-full max-w-md">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">設定月流量配額</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="traffic-quota-status">優先使用 Bandwagon 官方 API，否則使用手動配額</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="traffic-quota-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <div class="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 text-xs text-slate-400" id="traffic-quota-api-status">正在檢測官方 API...</div>
+                <div class="grid grid-cols-[minmax(0,1fr)_5rem] items-end gap-3">
+                    <label class="block text-xs text-slate-400 uppercase">手動月流量配額（可留空）
+                        <input id="traffic-quota-value" type="number" min="0" step="0.01" class="form-input" placeholder="例如 1">
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">單位
+                        <select id="traffic-quota-unit" class="form-input">
+                            <option value="GB">GB</option>
+                            <option value="TB">TB</option>
+                        </select>
+                    </label>
+                </div>
+                <label class="block text-xs text-slate-400 uppercase">VPS 到期日（可留空）
+                    <input id="vps-expiry-date" type="date" class="form-input font-mono">
+                    <span class="mt-1 block normal-case text-[11px] text-slate-500">搬瓦工 API 不提供到期日，請到 KiwiVM / 帳單頁查看後填入；續費後記得更新。</span>
+                </label>
+                <label class="flex items-center gap-2 text-sm text-slate-300 -mt-1">
+                    <input id="vps-expiry-notify" type="checkbox" class="h-4 w-4 accent-red-400">
+                    到期前 30 / 7 / 3 天發 Telegram 提醒，最後 3 天每天提醒
+                </label>
+                <div class="border-t border-slate-700 pt-4 space-y-3">
+                    <label class="flex items-center gap-2 text-sm text-slate-300">
+                        <input id="traffic-alert-enabled" type="checkbox" class="h-4 w-4 accent-amber-400">
+                        用量達到門檻時發 Telegram 提醒
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">提醒門檻（%，用逗號分隔）
+                        <input id="traffic-alert-thresholds" class="form-input font-mono" placeholder="80,90,100" autocomplete="off">
+                    </label>
+                    <p class="text-[11px] text-slate-500" id="traffic-alert-hint">每個門檻在一個計費週期內只提醒一次，重置後重新計算。</p>
+                </div>
+                <button id="traffic-quota-save" class="w-full rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition">保存設定</button>
+            </div>
+        </div>
+    </div>

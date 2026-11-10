@@ -1,8 +1,6 @@
 import pytest
 
-import app.main as main_module
-
-REAL_FETCH_BANDWAGON_INFO = main_module.fetch_bandwagon_info  # the shared fixture stubs it out
+from app.bandwagon import fetch_bandwagon_info as REAL_FETCH_BANDWAGON_INFO  # the shared fixture stubs it out
 
 
 def test_locations_use_api_descriptions(m):

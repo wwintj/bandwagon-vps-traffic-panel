@@ -1,0 +1,20 @@
+    <div id="panel-modal" class="modal-backdrop">
+        <div class="card w-full max-w-md">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">修改面板文字</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="panel-settings-status">保存後會立即更新頁面標題</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="panel-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <label class="block text-xs text-slate-400 uppercase">面板標題
+                    <input id="settings-title" class="form-input">
+                </label>
+                <label class="block text-xs text-slate-400 uppercase">副標題
+                    <input id="settings-subtitle" class="form-input">
+                </label>
+                <button id="panel-settings-save" class="w-full rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-sm py-2.5 transition">保存面板文字</button>
+            </div>
+        </div>
+    </div>

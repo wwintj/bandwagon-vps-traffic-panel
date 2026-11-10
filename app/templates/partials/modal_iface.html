@@ -1,0 +1,13 @@
+    <div id="iface-modal" class="modal-backdrop">
+        <div class="card w-full max-w-md max-h-[92vh] overflow-y-auto">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">監控網卡</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="iface-status">流量統計來自所選網卡；切換後從新網卡目前的計數開始累計，不會重複計算</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="iface-modal">&times;</button>
+            </div>
+            <div class="space-y-2" id="iface-list"></div>
+            <button id="iface-save" class="mt-4 w-full rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition">保存</button>
+        </div>
+    </div>
