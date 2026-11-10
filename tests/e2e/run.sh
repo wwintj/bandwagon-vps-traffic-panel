@@ -8,7 +8,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export VPS_PANEL_SRC="$REPO" VPS_PANEL_SKIP_PULL=1
 PASS="ci-password-123"
 DOMAIN="panel.test"
-CERT_DIR="/root/cert/$DOMAIN"
+# certbot layout: live/*.pem are symlinks into archive/, renewal repoints the symlinks
+LE_DIR="/etc/letsencrypt"
+CERT_DIR="$LE_DIR/live/$DOMAIN"
+ARCHIVE_DIR="$LE_DIR/archive/$DOMAIN"
 
 step() { echo; echo "=== $* ==="; }
 check() { echo "  ok: $*"; }
@@ -40,12 +43,14 @@ systemctl stop apache2 >/dev/null 2>&1 || true
 nohup python3 -m http.server 443 >/dev/null 2>&1 &
 nohup python3 -m http.server 80 >/dev/null 2>&1 &
 sleep 1
-mkdir -p "$CERT_DIR"
-make_cert "$CERT_DIR/private.key" "$CERT_DIR/fullchain.pem"
+mkdir -p "$CERT_DIR" "$ARCHIVE_DIR"
+make_cert "$ARCHIVE_DIR/privkey1.pem" "$ARCHIVE_DIR/fullchain1.pem"
+ln -s "../../archive/$DOMAIN/privkey1.pem" "$CERT_DIR/privkey.pem"
+ln -s "../../archive/$DOMAIN/fullchain1.pem" "$CERT_DIR/fullchain.pem"
 
 step "Install (non-interactive)"
 VPS_PANEL_USERNAME=admin VPS_PANEL_PASSWORD="$PASS" \
-VPS_PANEL_CERT="$CERT_DIR/fullchain.pem" VPS_PANEL_KEY="$CERT_DIR/private.key" VPS_PANEL_DOMAIN="$DOMAIN" \
+VPS_PANEL_CERT="$CERT_DIR/fullchain.pem" VPS_PANEL_KEY="$CERT_DIR/privkey.pem" VPS_PANEL_DOMAIN="$DOMAIN" \
     bash "$REPO/panel.sh" install </dev/null
 
 grep -q '^HTTPS_PORT=8443$' /opt/vps-traffic-panel/.env || die "expected fallback HTTPS port 8443"
@@ -70,22 +75,31 @@ code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" 
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"
 check "CSRF guard active"
 
-step "Certificate renewal: atomic replace (rename), like certbot / acme.sh"
+step "Certificate renewal: certbot-style symlink swap"
 systemctl is-active --quiet vps-traffic-panel-cert.path || die "cert watcher not active"
 before=$(served_serial 8443)
-make_cert /tmp/new.key /tmp/new.pem
-mv /tmp/new.key "$CERT_DIR/private.key"
-mv /tmp/new.pem "$CERT_DIR/fullchain.pem"
-wait_for_serial_change 8443 "$before" || die "Nginx still serves the old certificate after rename"
-check "new certificate served after rename ($before -> $(served_serial 8443))"
+make_cert "$ARCHIVE_DIR/privkey2.pem" "$ARCHIVE_DIR/fullchain2.pem"
+# certbot creates a temporary symlink and renames it over the live one
+ln -s "../../archive/$DOMAIN/privkey2.pem" "$CERT_DIR/privkey.pem.tmp" && mv -T "$CERT_DIR/privkey.pem.tmp" "$CERT_DIR/privkey.pem"
+ln -s "../../archive/$DOMAIN/fullchain2.pem" "$CERT_DIR/fullchain.pem.tmp" && mv -T "$CERT_DIR/fullchain.pem.tmp" "$CERT_DIR/fullchain.pem"
+wait_for_serial_change 8443 "$before" || die "Nginx still serves the old certificate after symlink swap"
+check "new certificate served after symlink swap ($before -> $(served_serial 8443))"
 
-step "Certificate renewal: in-place overwrite"
+step "Certificate renewal: in-place overwrite (acme.sh --install-cert / x-ui style)"
 before=$(served_serial 8443)
-make_cert /tmp/new2.key /tmp/new2.pem
-cat /tmp/new2.key > "$CERT_DIR/private.key"
-cat /tmp/new2.pem > "$CERT_DIR/fullchain.pem"
+make_cert /tmp/new3.key /tmp/new3.pem
+cat /tmp/new3.key > "$CERT_DIR/privkey.pem"
+cat /tmp/new3.pem > "$CERT_DIR/fullchain.pem"
 wait_for_serial_change 8443 "$before" || die "Nginx still serves the old certificate after overwrite"
 check "new certificate served after overwrite"
+
+step "Certificate renewal: plain rename of a regular file"
+before=$(served_serial 8443)
+make_cert /tmp/new4.key /tmp/new4.pem
+mv /tmp/new4.key "$CERT_DIR/privkey.pem"
+mv /tmp/new4.pem "$CERT_DIR/fullchain.pem"
+wait_for_serial_change 8443 "$before" || die "Nginx still serves the old certificate after rename"
+check "new certificate served after rename"
 
 step "Status"
 vps-panel status | tee /tmp/status.txt

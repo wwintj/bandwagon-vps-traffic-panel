@@ -38,67 +38,110 @@
 
 - Debian / Ubuntu（腳本使用 `apt-get` 與 systemd）
 - Python 3.8 以上
-- root 權限（僅安裝時需要）
+- root 權限
 
-## 安裝
+## 一鍵安裝 / 升級 / 卸載
+
+用 root 執行這一行，會出現選單：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh)
+```
+
+```
+======== VPS Traffic Panel ========
+  1) Install / 安裝
+  2) Update  / 升級
+  3) Uninstall / 卸載
+  4) Status / 狀態
+  5) Logs / 日誌
+  6) Restart / 重啟
+  0) Exit / 退出
+```
+
+裝好之後，隨時輸入 `vps-panel` 就能叫出同一個選單，也可以直接下指令：
+
+```bash
+vps-panel update        # 一鍵升級，保留資料與設定
+vps-panel status        # 版本、服務狀態、訪問網址、是否有新版本
+vps-panel logs          # 查看日誌
+vps-panel restart       # 重啟服務
+vps-panel uninstall     # 一鍵卸載（會問要不要先備份資料）
+```
+
+> 請用 `bash <(curl ...)`，不要用 `curl ... | bash`，否則安裝過程中無法輸入帳密。
+
+### 安裝時會問什麼
+
+1. 登入帳號（預設 `admin`）與密碼（至少 8 位，只能包含字母、數字與 `@ _ - . ! %`）
+2. 每月流量重置日
+3. 要不要用 HTTPS（見下一節）
+
+其餘都會自動完成：安裝依賴、建立 Python 虛擬環境、產生 `.env`、建立 `vps-traffic-panel` 系統用戶與 systemd 服務、開放 ufw 端口（如果 ufw 有啟用）。如果之前裝過，舊目錄會備份到 `/opt/vps-traffic-panel.old.<時間>`，**流量歷史會自動帶到新安裝**。
+
+### 無人值守安裝
+
+所有問題都可以用環境變數預先回答，適合批次部署：
+
+```bash
+VPS_PANEL_PASSWORD='your-password' \
+VPS_PANEL_CERT=/root/cert/fullchain.pem VPS_PANEL_KEY=/root/cert/private.key \
+VPS_PANEL_DOMAIN=monitor.example.com \
+bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh) install -y
+```
+
+| 變數 | 說明 |
+| --- | --- |
+| `VPS_PANEL_USERNAME` / `VPS_PANEL_PASSWORD` | 登入帳密（無人值守時密碼必填） |
+| `VPS_PANEL_RESET_DAY` | 每月重置日，預設 `1` |
+| `VPS_PANEL_PORT` | 面板後端端口，預設 `8088` |
+| `VPS_PANEL_CERT` / `VPS_PANEL_KEY` | 指定證書與私鑰 |
+| `VPS_PANEL_SSL` | `auto` 自動搜尋證書；`off` 不用 HTTPS。無人值守且沒指定證書時預設 `off` |
+| `VPS_PANEL_DOMAIN` | 面板域名；設為空字串則直接用 `https://IP:端口` |
+| `VPS_PANEL_HTTPS_PORT` | Nginx HTTPS 端口，預設 `443`，被占用時自動改用 `8443` |
+
+### 手動安裝（不用一鍵腳本）
 
 ```bash
 apt-get update && apt-get install -y git curl
-cd /opt
-git clone https://github.com/wwintj/vps-traffic-panel.git vps-traffic-panel-src
-cd /opt/vps-traffic-panel-src
-chmod +x scripts/*.sh
-sudo ./scripts/install.sh
+git clone https://github.com/wwintj/vps-traffic-panel.git /opt/vps-traffic-panel-src
+sudo /opt/vps-traffic-panel-src/scripts/install.sh   # 安裝
+sudo /opt/vps-traffic-panel-src/scripts/update.sh    # 升級（會自動拉取最新版）
+sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份資料
 ```
 
-安裝腳本會詢問登入帳號、密碼（至少 8 位，只能包含字母、數字與 `@ _ - . ! %`）和每月重置日，然後自動：
+## 已經有 SSL 證書？直接用
 
-1. 偵測舊安裝並備份到 `/opt/vps-traffic-panel.old.<時間>`，**流量歷史會自動帶到新安裝**
-2. 自動選擇端口（預設 8088，被占用時讓你輸入）
-3. 搜尋 VPS 上已有的 SSL 證書（Let's Encrypt、acme.sh、Nginx、x-ui / 3x-ui 等）
-4. 建立 Python 虛擬環境、安裝依賴、產生 `.env`
-5. 建立 `vps-traffic-panel` 系統用戶與 systemd 服務並啟動
+安裝腳本會自動搜尋 VPS 上已有的證書，找到後列出來讓你選：
 
-安裝完成後，終端會顯示訪問地址。
+- Let's Encrypt / certbot：`/etc/letsencrypt/live/`
+- acme.sh：`/root/.acme.sh/`
+- `/root/cert/`、`/root/*.crt` 這類常見路徑
+- x-ui / 3x-ui 的資料庫與設定
+- 現有 Nginx 設定裡引用的證書
+- `/etc/v2ray-agent`、`/etc/hysteria`、`/etc/sing-box`、`/etc/trojan` 等
 
-### 三種訪問模式
+選好證書後，輸入你要用來打開面板的域名（預設是證書上的域名）：
 
-| 模式 | 條件 | 面板監聽 | 訪問方式 |
-| --- | --- | --- | --- |
-| HTTP | 沒有證書 | `0.0.0.0:端口` | `http://IP:端口` |
-| Nginx HTTPS | 有證書並填寫域名 | `127.0.0.1:端口` | `https://域名` |
-| 直連 HTTPS | 有證書但不填域名 | `0.0.0.0:端口` | `https://IP:端口` |
+| 你的選擇 | 面板怎麼跑 | 訪問方式 |
+| --- | --- | --- |
+| 填域名 | Nginx 負責 HTTPS，面板只監聽本機 | `https://域名` |
+| 不填域名 | 面板直接跑 HTTPS（以 root 運行，才能讀取私鑰） | `https://IP:端口`，瀏覽器會提示證書與 IP 不符 |
+| 沒有證書 / 不使用 | HTTP | `http://IP:端口` |
 
-Nginx 模式下面板只監聽本機，外部只能透過 Nginx 的 HTTPS 訪問。直連 HTTPS 模式需要讀取證書私鑰，因此以 root 運行，其他模式都以低權限用戶運行。
+**443 已經被 xray / x-ui 等程式占用也沒關係。** 安裝腳本會偵測端口是誰在用：
 
-> 只用 HTTP 時，帳密以 Basic Auth 明文傳輸，建議至少放在 HTTPS 反向代理後面。
+- 443 被別的程式占用 → 自動改用 `8443`（或讓你輸入其他端口），訪問 `https://域名:8443`
+- 80 被占用 → 不建立 HTTP 跳轉，也不會讓新裝的 Nginx 搶端口
+- 已經在跑的 Nginx 不受影響，面板以獨立的 `server_name` 加進去
+- Nginx 若因任何原因起不來，會自動退回 HTTP 模式，面板仍然能打開
+- 安裝最後會自我檢查 HTTPS 是否真的能連上
 
-## 升級
+> 如果用了 8443 之類的非標準端口，記得在雲服務商的防火牆 / 安全組放行。
 
-```bash
-cd /opt/vps-traffic-panel-src
-git fetch origin
-git reset --hard origin/main
-sudo ./scripts/update.sh
-```
+**證書續期後自動生效。** 安裝時會建立 `vps-traffic-panel-cert.path` 監看證書檔案。不管是 certbot、acme.sh、x-ui 還是手動覆蓋，只要證書一變，就會自動 reload Nginx（直連模式則重啟面板），不需要額外設定續期鉤子。用 `vps-panel status` 可以看到「Cert watch: on」。
 
-升級腳本會：
-
-- 用 `sqlite3 .backup` 備份 `data.db` 和 `.env` 到 `/opt/vps-traffic-panel/backups/`（保留最近 10 份）
-- 同步程式檔案、更新依賴、重啟服務
-- 顯示升級前後的版本號
-
-`.env`、資料庫和面板設定都會保留。從舊版升級到 v1.0.0 的注意事項見 [CHANGELOG.md](CHANGELOG.md)。
-
-## 卸載
-
-```bash
-cd /opt/vps-traffic-panel
-sudo ./scripts/uninstall.sh              # 全部刪除
-sudo ./scripts/uninstall.sh --keep-data  # 先把 .env 和 data.db 備份到 /root/vps-traffic-panel-backup-<時間>
-```
-
-卸載會停止並移除 systemd 服務、Nginx 設定、安裝目錄和服務用戶。
+**證書上的域名必須和你訪問的域名一致**，例如證書是 `*.example.com`，就要用 `monitor.example.com` 這類子域名訪問，並在 DNS 把它解析到這台 VPS。
 
 ## 設定
 
@@ -117,7 +160,7 @@ sudo ./scripts/uninstall.sh --keep-data  # 先把 .env 和 data.db 備份到 /ro
 | `TELEGRAM_TIMEZONE_OFFSET` / `TELEGRAM_TIMEZONE_LABEL` | **面板時區**（見下方） | `8` / `中國時間` |
 | `BANDWAGON_VEID` / `BANDWAGON_API_KEY` | 搬瓦工 API | 空 |
 | `CLOUDFLARE_DDNS_ENABLED` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID` / `CLOUDFLARE_RECORD_NAME` / `CLOUDFLARE_PROXIED` | Cloudflare DDNS | 關閉 |
-| `SSL_ENABLED` / `SSL_CERTFILE` / `SSL_KEYFILE` / `HTTPS_MODE` / `PANEL_DOMAIN` | HTTPS 設定，由安裝腳本寫入 | |
+| `SSL_ENABLED` / `SSL_CERTFILE` / `SSL_KEYFILE` / `HTTPS_MODE` / `HTTPS_PORT` / `PANEL_DOMAIN` | HTTPS 設定，由安裝腳本寫入 | |
 
 ### 時區
 
@@ -189,6 +232,8 @@ nginx -t && systemctl reload nginx
 ## 常用命令
 
 ```bash
+vps-panel               # 管理選單
+vps-panel status
 systemctl status vps-traffic-panel
 systemctl restart vps-traffic-panel
 journalctl -u vps-traffic-panel -f
@@ -207,7 +252,17 @@ journalctl -u vps-traffic-panel -n 50
 
 ### 升級後 `http://IP:8088` 打不開了
 
-如果你用的是 Nginx HTTPS 模式，這是預期行為：面板現在只監聽本機，請改用 `https://你的域名` 訪問。
+如果你用的是 Nginx HTTPS 模式，這是預期行為：面板現在只監聽本機，請改用 `https://你的域名` 訪問。執行 `vps-panel status` 可以看到正確網址。
+
+### HTTPS 打不開，但 HTTP 可以
+
+- 用了 `8443` 等非標準端口時，確認雲服務商的防火牆 / 安全組已放行
+- 確認域名已解析到這台 VPS，且和證書上的域名一致
+- 檢查 Nginx：`nginx -t && systemctl status nginx`
+
+### 證書續期了，瀏覽器還是顯示舊證書
+
+先確認監看服務在運行：`systemctl status vps-traffic-panel-cert.path`。手動套用新證書：`bash /opt/vps-traffic-panel/scripts/cert-watch.sh reload`。
 
 ### 提示 Too many failed logins
 
@@ -246,6 +301,12 @@ pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
+端到端測試（會真的安裝 Nginx 與 systemd 服務，**只在用完即丟的機器上跑**，CI 每次都會跑）：
+
+```bash
+sudo bash tests/e2e/run.sh
+```
+
 本機運行（資料放在獨立目錄，不影響專案目錄）：
 
 ```bash
@@ -265,8 +326,9 @@ app/
   config.py      讀取 .env
   templates/     前端頁面
   static/        前端靜態資源
-scripts/         安裝 / 升級 / 卸載
-tests/           pytest
+panel.sh         一鍵管理選單（vps-panel）
+scripts/         安裝 / 升級 / 卸載 / 證書續期監看
+tests/           pytest 與端到端測試
 ```
 
 ## 更新日誌

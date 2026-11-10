@@ -384,7 +384,16 @@ detect_ssl_certificates() {
 
     local choice=1
     if [ "${#unique_candidates[@]}" -eq 1 ]; then
-        ok "Using the only detected certificate automatically."
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            local use_it
+            read -r -p "Use this certificate for HTTPS? [Y/n]: " use_it
+            if [[ "$use_it" =~ ^[Nn]$ ]]; then
+                info "The panel will run over HTTP."
+                return
+            fi
+        else
+            ok "Using the only detected certificate automatically."
+        fi
     elif [ "$INTERACTIVE" -eq 1 ]; then
         echo "  0) Do not use HTTPS"
         while true; do
