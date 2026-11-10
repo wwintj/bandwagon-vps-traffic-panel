@@ -612,14 +612,12 @@ AUTH_PASSWORD="${VPS_PANEL_PASSWORD:-}"
 while true; do
     if [ -z "$AUTH_PASSWORD" ]; then
         [ "$INTERACTIVE" -eq 1 ] || fail "Set VPS_PANEL_PASSWORD for a non-interactive install."
-        read -r -s -p "Login Password (at least 8 characters): " AUTH_PASSWORD
+        read -r -s -p "Login Password: " AUTH_PASSWORD
         echo ""
-    fi
-    if [[ ${#AUTH_PASSWORD} -lt 8 || "$AUTH_PASSWORD" == "password" || "$AUTH_PASSWORD" == "12345678" ]]; then
-        [ "$INTERACTIVE" -eq 1 ] || fail "Password must be at least 8 characters and not a common default."
-        echo -e "${RED}Error: Password must be at least 8 characters and not a common default.${RESET}"
-        AUTH_PASSWORD=""
-        continue
+        if [ -z "$AUTH_PASSWORD" ]; then
+            echo -e "${RED}Error: Password cannot be empty.${RESET}"
+            continue
+        fi
     fi
     if [[ ! "$AUTH_PASSWORD" =~ ^[a-zA-Z0-9@_\.\!\%\-]+$ ]]; then
         [ "$INTERACTIVE" -eq 1 ] || fail "Password may only contain letters, numbers and @ _ - . ! %"

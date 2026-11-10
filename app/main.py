@@ -988,8 +988,6 @@ async def api_update_settings(payload: dict, username: str = Depends(verify_auth
         raise HTTPException(status_code=400, detail="Invalid username")
     if new_password and not is_safe_auth_value(new_password):
         raise HTTPException(status_code=400, detail="Invalid password")
-    if new_password and len(new_password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if not new_title or not new_subtitle:
         raise HTTPException(status_code=400, detail="Panel title and subtitle cannot be empty")
 

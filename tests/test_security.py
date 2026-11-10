@@ -92,8 +92,16 @@ def test_proxy_headers_only_trusted_from_localhost(m):
     assert m.get_client_ip(FakeRequest("127.0.0.1", {"x-forwarded-for": "6.6.6.6, 198.51.100.7"})) == "198.51.100.7"
 
 
-def test_short_password_rejected_in_panel(client, post_headers):
-    payload = {"auth_username": "admin", "auth_password": "short", "panel_title": "t", "panel_subtitle": "s"}
+def test_short_password_allowed_in_panel(m, client, post_headers, monkeypatch):
+    monkeypatch.setattr(m, "update_env_values", lambda updates: None)
+    monkeypatch.setattr(m, "AUTH_PASSWORD", m.AUTH_PASSWORD)
+    payload = {"auth_username": "admin", "auth_password": "abc", "panel_title": "t", "panel_subtitle": "s"}
+    assert client.post("/api/settings", headers=post_headers, json=payload).status_code == 200
+    assert m.AUTH_PASSWORD == "abc"
+
+
+def test_password_with_unsafe_characters_rejected(client, post_headers):
+    payload = {"auth_username": "admin", "auth_password": "a b$c", "panel_title": "t", "panel_subtitle": "s"}
     assert client.post("/api/settings", headers=post_headers, json=payload).status_code == 400
 
 
