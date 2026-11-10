@@ -69,11 +69,23 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.4.0"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.5.0"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"
 check "CSRF guard active"
+
+ssl_json=$(curl -s -u "admin:$PASS" "http://127.0.0.1:8088/api/ssl-status?refresh=1")
+echo "  ssl-status: $ssl_json"
+echo "$ssl_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["enabled"] and d["mode"] == "nginx" and d["port"] == 8443, d
+assert d["reachable"] and d["subject"] == "panel.test", d
+assert d["trusted"] is False and d["error"], d      # self-signed in CI
+assert d["renewal_watch"] is True, d
+' || die "ssl-status did not describe the served certificate"
+check "panel reads its own served certificate"
 
 step "Certificate renewal: certbot-style symlink swap"
 systemctl is-active --quiet vps-traffic-panel-cert.path || die "cert watcher not active"

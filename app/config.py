@@ -67,3 +67,9 @@ TRAFFIC_ALERT_THRESHOLDS = os.getenv("TRAFFIC_ALERT_THRESHOLDS", "80,90,100")
 # VPS billing expiry date (YYYY-MM-DD). The KiwiVM API does not expose it, so it is entered by hand.
 VPS_EXPIRY_DATE = os.getenv("VPS_EXPIRY_DATE", "")
 VPS_EXPIRY_NOTIFY = os.getenv("VPS_EXPIRY_NOTIFY", "1")
+# Written by the installer; used to inspect the certificate the panel is serving.
+HTTPS_MODE = os.getenv("HTTPS_MODE", "none")
+HTTPS_PORT = os.getenv("HTTPS_PORT", "")
+PANEL_DOMAIN = os.getenv("PANEL_DOMAIN", "")
+SSL_CERTFILE = os.getenv("SSL_CERTFILE", "")
+SSL_EXPIRY_NOTIFY = os.getenv("SSL_EXPIRY_NOTIFY", "1")

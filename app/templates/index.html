@@ -77,6 +77,7 @@
                 <p>ISP: <span id="ip-isp" class="text-slate-300">...</span></p>
                 <p>ASN: <span id="ip-as" class="text-slate-400">...</span></p>
                 <p id="vps-expiry-row" class="hidden">到期: <span id="vps-expiry" class="text-slate-200 font-mono"></span></p>
+                <p>SSL: <button id="ssl-summary" type="button" class="font-mono text-slate-400 underline decoration-dotted underline-offset-2 hover:text-slate-200" title="查看目前使用的 SSL 證書">檢查中...</button></p>
             </div>
         </div>
         <div class="card border-t-4 border-t-sky-400">
@@ -300,6 +301,27 @@
         </div>
     </div>
 
+    <div id="ssl-modal" class="modal-backdrop">
+        <div class="card w-full max-w-lg max-h-[92vh] overflow-y-auto">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">SSL 證書</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="ssl-status-note">面板直接連線自己的 HTTPS 端口，讀出瀏覽器實際看到的證書</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="ssl-modal">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <div class="rounded border border-slate-700 bg-slate-900/60 p-3 text-xs space-y-1.5" id="ssl-details"></div>
+                <label class="flex items-center gap-2 text-sm text-slate-300">
+                    <input id="ssl-expiry-notify" type="checkbox" class="h-4 w-4 accent-red-400">
+                    證書剩 14 / 7 天時發 Telegram 提醒，最後 3 天每天提醒
+                </label>
+                <p class="text-[11px] text-slate-500">Let's Encrypt 會在到期前約 30 天自動續簽；剩 14 天仍未續上，通常代表自動續簽失敗。</p>
+                <button id="ssl-refresh" class="w-full rounded border border-emerald-500/60 hover:border-emerald-300 text-emerald-200 font-bold text-sm py-2.5 transition">重新檢查</button>
+            </div>
+        </div>
+    </div>
+
     <div id="ddns-modal" class="modal-backdrop">
         <div class="card w-full max-w-lg max-h-[92vh] overflow-y-auto">
             <div class="flex items-start justify-between gap-4 mb-5">
@@ -516,6 +538,90 @@
             // An expired VPS takes the panel down with it, so warn early: amber at 14 days, red at 7.
             el.className = `font-mono ${days <= 7 ? 'text-red-400 font-semibold' : days <= 14 ? 'text-amber-400' : 'text-slate-200'}`;
             row.classList.remove('hidden');
+        }
+
+        let sslStatus = null;
+
+        function renderSslStatus(data) {
+            sslStatus = data;
+            const summary = document.getElementById('ssl-summary');
+            let text = '未啟用（HTTP）';
+            let tone = 'text-slate-400';
+            if (data.enabled) {
+                const days = data.days_left;
+                if (!data.reachable) {
+                    text = '無法連線';
+                    tone = 'text-red-400';
+                } else if (!data.trusted) {
+                    text = '證書有問題';
+                    tone = 'text-red-400';
+                } else {
+                    text = `有效（剩 ${days} 天）`;
+                    tone = days <= 7 ? 'text-red-400' : days <= 14 ? 'text-amber-400' : 'text-emerald-400';
+                }
+            }
+            summary.textContent = text;
+            summary.className = `font-mono underline decoration-dotted underline-offset-2 hover:text-slate-200 ${tone}`;
+            renderSslDetails(data);
+        }
+
+        function renderSslDetails(data) {
+            const box = document.getElementById('ssl-details');
+            const rows = [];
+            if (!data.enabled) {
+                rows.push(['狀態', '未啟用 HTTPS，面板目前以 HTTP 提供服務', 'text-amber-300']);
+                rows.push(['啟用方式', '在 VPS 執行 vps-panel，選擇重新安裝並使用證書', '']);
+            } else {
+                const state = !data.reachable ? `無法連線：${data.error}` : data.trusted ? '有效，瀏覽器會信任' : `有問題：${data.error}`;
+                rows.push(['狀態', state, data.trusted ? 'text-emerald-300' : 'text-red-300']);
+                rows.push(['面板網域', data.domain || '（以 IP 直連）', '']);
+                rows.push(['證書網域', [data.subject, ...(data.san || []).filter(n => n !== data.subject)].filter(Boolean).join('、') || '未知', '']);
+                rows.push(['簽發者', data.issuer || '未知', '']);
+                if (data.not_after) {
+                    const days = data.days_left;
+                    rows.push(['到期日', `${data.not_after}（${days < 0 ? `已過期 ${-days} 天` : `剩 ${days} 天`}）`, days <= 7 ? 'text-red-300' : days <= 14 ? 'text-amber-300' : '']);
+                }
+                rows.push(['HTTPS 模式', data.mode === 'nginx' ? `Nginx 反向代理，端口 ${data.port}` : `面板直連 HTTPS，端口 ${data.port}`, '']);
+                if (data.cert_file) rows.push(['證書檔案', data.cert_file, '']);
+                if (data.renewal_watch !== null && data.renewal_watch !== undefined) {
+                    rows.push(['續期監看', data.renewal_watch ? '運行中：證書更新後自動套用' : '未運行（執行 vps-panel update 可啟用）', data.renewal_watch ? '' : 'text-amber-300']);
+                }
+            }
+            box.replaceChildren(...rows.map(([label, value, cls]) => {
+                const p = document.createElement('p');
+                const l = document.createElement('span');
+                l.className = 'text-slate-500';
+                l.textContent = `${label}：`;
+                const v = document.createElement('span');
+                v.className = `break-all ${cls || 'text-slate-200'}`;
+                v.textContent = value;
+                p.append(l, v);
+                return p;
+            }));
+            document.getElementById('ssl-expiry-notify').checked = data.ssl_expiry_notify !== false;
+        }
+
+        async function fetchSslStatus(refresh = false) {
+            try {
+                const res = await fetch(`/api/ssl-status${refresh ? '?refresh=1' : ''}`);
+                if (!res.ok) throw new Error(res.statusText);
+                renderSslStatus(await res.json());
+            } catch (e) {
+                document.getElementById('ssl-summary').textContent = '讀取失敗';
+                console.error("Error fetching /api/ssl-status:", e);
+            }
+        }
+
+        async function saveSslNotify() {
+            try {
+                await fetch('/api/ssl-settings', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ssl_expiry_notify: document.getElementById('ssl-expiry-notify').checked })
+                });
+            } catch (e) {
+                console.error("Error saving /api/ssl-settings:", e);
+            }
         }
 
         function formatCoordinates(lat, lon) {
@@ -1232,6 +1338,14 @@
         document.getElementById('open-migrate-settings').addEventListener('click', () => openModal('migrate-modal'));
         document.getElementById('open-traffic-quota').addEventListener('click', () => openModal('traffic-quota-modal'));
         document.getElementById('open-reset-day').addEventListener('click', () => openModal('reset-day-modal'));
+        document.getElementById('ssl-summary').addEventListener('click', () => openModal('ssl-modal'));
+        document.getElementById('ssl-refresh').addEventListener('click', async () => {
+            const note = document.getElementById('ssl-status-note');
+            note.textContent = '正在重新檢查...';
+            await fetchSslStatus(true);
+            note.textContent = '已重新檢查。面板直接連線自己的 HTTPS 端口，讀出瀏覽器實際看到的證書';
+        });
+        document.getElementById('ssl-expiry-notify').addEventListener('change', saveSslNotify);
         document.getElementById('auth-settings-save').addEventListener('click', () => saveSettings('auth'));
         document.getElementById('panel-settings-save').addEventListener('click', () => saveSettings('panel'));
         document.getElementById('telegram-save').addEventListener('click', saveTelegramSettings);
@@ -1247,12 +1361,13 @@
         document.querySelectorAll('.settings-close').forEach((button) => {
             button.addEventListener('click', () => closeModal(button.dataset.modal));
         });
-        fetchSystem(); fetchSummary(); fetchCharts(); fetchSettings(); fetchTelegramSettings(); fetchDdnsSettings(); fetchBandwagonSettings(); fetchTrafficQuotaSettings(); fetchLatency(); resumeMigrationPollingIfNeeded();
+        fetchSystem(); fetchSummary(); fetchCharts(); fetchSettings(); fetchTelegramSettings(); fetchDdnsSettings(); fetchBandwagonSettings(); fetchTrafficQuotaSettings(); fetchLatency(); fetchSslStatus(); resumeMigrationPollingIfNeeded();
         setInterval(fetchRealtime, 2000);
         setInterval(fetchLatency, 10000);
         setInterval(fetchSummary, 5000);
         setInterval(fetchSystem, 5000);
         setInterval(fetchCharts, 60000);
+        setInterval(fetchSslStatus, 600000);
         window.addEventListener('resize', () => { chart24h.resize(); chart30d.resize(); chart12m.resize(); });
     </script>
 </body>

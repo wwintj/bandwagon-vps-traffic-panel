@@ -141,6 +141,8 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 
 > 如果用了 8443 之類的非標準端口，記得在雲服務商的防火牆 / 安全組放行。
 
+**面板裡隨時查看證書狀態。** 「伺服器信息」最下方的「SSL」一行會顯示證書是否有效與剩餘天數，點開可看網域、簽發者、到期日、HTTPS 模式與端口、續期監看狀態。面板是直接連線自己的 HTTPS 端口讀取證書，看到的就是瀏覽器拿到的那一張；證書剩 14 / 7 天時會發 Telegram 提醒，最後 3 天每天提醒（自動續簽正常時不會收到）。
+
 **證書續期後自動生效。** 安裝時會建立 `vps-traffic-panel-cert.path` 監看證書檔案。不管是 certbot、acme.sh、x-ui 還是手動覆蓋，只要證書一變，就會自動 reload Nginx（直連模式則重啟面板），不需要額外設定續期鉤子。用 `vps-panel status` 可以看到「Cert watch: on」。
 
 **證書上的域名必須和你訪問的域名一致**，例如證書是 `*.example.com`，就要用 `monitor.example.com` 這類子域名訪問，並在 DNS 把它解析到這台 VPS。
@@ -159,6 +161,7 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 | `TRAFFIC_QUOTA_BYTES` | 手動月流量配額（位元組），`0` 為不設定 | `0` |
 | `TRAFFIC_ALERT_ENABLED` / `TRAFFIC_ALERT_THRESHOLDS` | 流量預警開關與門檻（%，逗號分隔） | `1` / `80,90,100` |
 | `VPS_EXPIRY_DATE` / `VPS_EXPIRY_NOTIFY` | VPS 到期日（`YYYY-MM-DD`，需手動填寫）與是否發到期提醒 | 空 / `1` |
+| `SSL_EXPIRY_NOTIFY` | SSL 證書剩 14 / 7 天及最後 3 天時發 Telegram 提醒 | `1` |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 推送 | 關閉 |
 | `TELEGRAM_PUSH_HOUR` / `TELEGRAM_PUSH_MINUTE` | 每日推送時間 | `20:00` |
 | `TELEGRAM_TIMEZONE_OFFSET` / `TELEGRAM_TIMEZONE_LABEL` | **面板時區**（見下方） | `8` / `中國時間` |

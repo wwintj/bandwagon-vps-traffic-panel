@@ -25,10 +25,11 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY, PORT, HTTPS_MODE, HTTPS_PORT, PANEL_DOMAIN, SSL_CERTFILE, SSL_EXPIRY_NOTIFY
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
+from app import sslinfo
 from app import __version__
 
 security = HTTPBasic()
@@ -688,6 +689,69 @@ def check_expiry_reminder(now=None):
     set_meta_value("expiry_reminder_sent", ",".join((sent + [stage])[-10:]))
     return stage
 
+SSL_STATUS_CACHE = {"data": None, "updated_at": 0}
+SSL_STATUS_TTL = 600
+
+def get_ssl_status(force=False):
+    """Certificate the panel is serving right now, as a browser would see it."""
+    now = time.time()
+    if not force and SSL_STATUS_CACHE["data"] is not None and now - SSL_STATUS_CACHE["updated_at"] < SSL_STATUS_TTL:
+        return SSL_STATUS_CACHE["data"]
+    status = {
+        "enabled": HTTPS_MODE in ("nginx", "uvicorn"),
+        "mode": HTTPS_MODE,
+        "domain": PANEL_DOMAIN,
+        "port": None,
+        "cert_file": SSL_CERTFILE,
+    }
+    if status["enabled"]:
+        if HTTPS_MODE == "nginx":
+            status["port"] = int(HTTPS_PORT or 443)
+            target = (PANEL_DOMAIN or None)
+        else:
+            status["port"] = int(PORT)
+            target = None  # direct HTTPS is reached by IP; only the chain can be checked
+        status.update(sslinfo.inspect_tls("127.0.0.1", status["port"], target))
+        status["renewal_watch"] = sslinfo.cert_watch_active()
+    SSL_STATUS_CACHE["data"] = status
+    SSL_STATUS_CACHE["updated_at"] = now
+    return status
+
+def check_ssl_expiry_reminder(now=None, status=None):
+    """Telegram reminder when the served certificate is close to expiry, which means automatic
+    renewal is not working (Let's Encrypt renews ~30 days ahead). 14 and 7 days out, then daily."""
+    if SSL_EXPIRY_NOTIFY != "1":
+        return None
+    now = now or configured_now()
+    if (now.hour, now.minute) < (TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE):
+        return None
+    status = status or get_ssl_status(force=True)
+    days = status.get("days_left") if status.get("enabled") else None
+    if days is None or days > 14:
+        return None
+    stage = "14" if days > 7 else "7" if days > 3 else f"day-{now.date().isoformat()}"
+
+    key = status.get("not_after", "")
+    if get_meta_value("ssl_reminder_cert", "") != key:
+        set_meta_value("ssl_reminder_cert", key)
+        set_meta_value("ssl_reminder_sent", "")
+    sent = [item for item in get_meta_value("ssl_reminder_sent", "").split(",") if item]
+    if stage in sent:
+        return None
+
+    title = f"SSL 證書已過期 {-days} 天" if days < 0 else f"SSL 證書剩 {days} 天到期"
+    lines = [
+        f"網域：<code>{escape_html(status.get('domain') or status.get('subject') or '未知')}</code>",
+        f"到期日：<b>{escape_html(status.get('not_after', ''))}</b>",
+        f"簽發者：{escape_html(status.get('issuer') or '未知')}",
+        "Let's Encrypt 會在到期前約 30 天自動續簽，收到這則提醒代表自動續簽可能失敗。",
+        "請檢查 acme.sh / certbot / x-ui 的續簽紀錄；續簽成功後面板會自動套用新證書。",
+    ]
+    if not send_telegram_notice(migration_telegram_message(title, lines)):
+        return None
+    set_meta_value("ssl_reminder_sent", ",".join((sent + [stage])[-10:]))
+    return stage
+
 def run_traffic_alert_check(pending):
     summary = get_traffic_summary(pending)
     return check_traffic_alert(summary.get("traffic_quota"))
@@ -700,6 +764,7 @@ async def traffic_alert_watcher():
                 if TRAFFIC_ALERT_ENABLED == "1":
                     await run_blocking(run_traffic_alert_check, collector_instance.snapshot_pending())
                 await run_blocking(check_expiry_reminder)
+                await run_blocking(check_ssl_expiry_reminder)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1614,6 +1679,19 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
         "traffic_quota": summary.get("traffic_quota", {}),
         "vps_expiry": summary.get("vps_expiry"),
     }
+
+@app.get("/api/ssl-status")
+async def api_ssl_status(refresh: int = 0, username: str = Depends(verify_auth)):
+    status = dict(await run_blocking(get_ssl_status, bool(refresh)))
+    status["ssl_expiry_notify"] = SSL_EXPIRY_NOTIFY == "1"
+    return status
+
+@app.post("/api/ssl-settings")
+async def api_ssl_settings(payload: dict, username: str = Depends(verify_auth)):
+    global SSL_EXPIRY_NOTIFY
+    SSL_EXPIRY_NOTIFY = "1" if payload.get("ssl_expiry_notify") else "0"
+    update_env_values({"SSL_EXPIRY_NOTIFY": SSL_EXPIRY_NOTIFY})
+    return {"ok": True, "ssl_expiry_notify": SSL_EXPIRY_NOTIFY == "1"}
 
 @app.get("/api/realtime")
 async def api_realtime(username: str = Depends(verify_auth)):
