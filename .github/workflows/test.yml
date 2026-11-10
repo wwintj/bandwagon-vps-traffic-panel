@@ -2,8 +2,8 @@ name: test
 
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   python:
@@ -28,5 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: for f in scripts/*.sh; do bash -n "$f"; done
-      - run: shellcheck -S error scripts/*.sh
+      - run: for f in panel.sh scripts/*.sh tests/e2e/*.sh; do bash -n "$f"; done
+      - run: shellcheck -S error panel.sh scripts/*.sh tests/e2e/*.sh
+
+  e2e:
+    # Full install -> certificate renewal -> update -> uninstall on a real systemd host.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo bash tests/e2e/run.sh

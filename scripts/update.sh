@@ -65,7 +65,9 @@ main() {
     prune_backups '.env.*.bak'
     prune_backups 'data.db.*.bak'
 
-    if [ -d "$SOURCE_DIR/.git" ]; then
+    if [ "${VPS_PANEL_SKIP_PULL:-0}" = "1" ]; then
+        echo -e "${YELLOW}Using source already in $SOURCE_DIR.${RESET}"
+    elif [ -d "$SOURCE_DIR/.git" ]; then
         echo -e "${YELLOW}Pulling latest source from GitHub...${RESET}"
         git -C "$SOURCE_DIR" fetch origin
         git -C "$SOURCE_DIR" reset --hard origin/main
@@ -103,6 +105,9 @@ main() {
     echo -e "${YELLOW}Restarting service...${RESET}"
     systemctl daemon-reload
     systemctl restart "$SERVICE_NAME"
+
+    # Keep HTTPS working across certificate renewals (also enables it for older installs).
+    bash "$INSTALL_DIR/scripts/cert-watch.sh" sync
 
     local new_version
     new_version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$INSTALL_DIR/app/__init__.py" 2>/dev/null || true)

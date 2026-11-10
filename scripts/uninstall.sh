@@ -54,6 +54,13 @@ if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
 fi
 
+for unit in "${SERVICE_NAME}-cert.path" "${SERVICE_NAME}-cert.service"; do
+    if [[ -f "/etc/systemd/system/$unit" ]]; then
+        systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/$unit"
+    fi
+done
+
 systemctl daemon-reload
 
 if [[ -f "$NGINX_CONFIG_FILE" ]]; then
