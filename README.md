@@ -15,7 +15,8 @@
 - 即時上下行速度
 - 今日、本期（自訂每月重置日）、累計流量
 - 最近 24 小時 / 30 天 / 12 個月趨勢圖
-- 月流量配額進度條：手動設定，或直接讀取 Bandwagon 官方用量
+- 月流量配額進度條與「距離重置還剩幾天」：手動設定，或直接讀取 Bandwagon 官方用量
+- 流量預警：用量達 80% / 90% / 100%（可自訂）時發 Telegram 提醒，每個計費週期每檔只提醒一次
 - 一鍵清零統計
 
 **伺服器資訊**
@@ -26,7 +27,7 @@
 - 網卡離線偵測，自動切換到有流量的網卡
 
 **整合**
-- Telegram 每日流量推送（自訂時區與時間）
+- Telegram 每日流量推送（自訂時區與時間），含 Bandwagon 官方配額、剩餘流量與距離重置天數
 - Cloudflare DDNS：公網 IP 變動時自動更新 A 記錄（只需 Token 與域名，自動偵測 Zone，變更 / 失敗發 Telegram 通知）
 - Bandwagon（搬瓦工）：查詢官方配額、讀取可用機房、一鍵切換機房並追蹤新 IP 與 DNS 生效
 
@@ -155,6 +156,7 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 | `INTERFACE` | 指定網卡，留空自動偵測 | 空 |
 | `MONTH_RESET_DAY` | 每月流量重置日（1–31，月份天數不足時取月底） | `1` |
 | `TRAFFIC_QUOTA_BYTES` | 手動月流量配額（位元組），`0` 為不設定 | `0` |
+| `TRAFFIC_ALERT_ENABLED` / `TRAFFIC_ALERT_THRESHOLDS` | 流量預警開關與門檻（%，逗號分隔） | `1` / `80,90,100` |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 推送 | 關閉 |
 | `TELEGRAM_PUSH_HOUR` / `TELEGRAM_PUSH_MINUTE` | 每日推送時間 | `20:00` |
 | `TELEGRAM_TIMEZONE_OFFSET` / `TELEGRAM_TIMEZONE_LABEL` | **面板時區**（見下方） | `8` / `中國時間` |

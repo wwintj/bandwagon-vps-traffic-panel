@@ -64,6 +64,7 @@
                     <span id="traffic-quota-detail" class="ml-auto whitespace-nowrap font-mono text-slate-300">未設定</span>
                 </div>
                 <div id="traffic-quota-track" class="progress-track mt-1.5 hidden"><div class="progress-fill bg-emerald-400" id="traffic-quota-bar"></div></div>
+                <p id="traffic-quota-reset" class="mt-1 text-[10px] text-slate-500 hidden"></p>
             </div>
         </div>
         <div class="card border-t-4 border-t-violet-400">
@@ -214,9 +215,9 @@
             </div>
             <div class="space-y-4">
                 <div class="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 text-xs text-slate-400" id="traffic-quota-api-status">正在檢測官方 API...</div>
-                <div class="grid grid-cols-[minmax(0,1fr)_5rem_auto] items-end gap-3">
-                    <label class="block text-xs text-slate-400 uppercase">手動月流量配額
-                        <input id="traffic-quota-value" type="number" min="0" step="0.01" class="form-input" placeholder="1">
+                <div class="grid grid-cols-[minmax(0,1fr)_5rem] items-end gap-3">
+                    <label class="block text-xs text-slate-400 uppercase">手動月流量配額（可留空）
+                        <input id="traffic-quota-value" type="number" min="0" step="0.01" class="form-input" placeholder="例如 1">
                     </label>
                     <label class="block text-xs text-slate-400 uppercase">單位
                         <select id="traffic-quota-unit" class="form-input">
@@ -224,8 +225,18 @@
                             <option value="TB">TB</option>
                         </select>
                     </label>
-                    <button id="traffic-quota-save" class="whitespace-nowrap rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm px-4 py-2.5 transition">保存手動配額</button>
                 </div>
+                <div class="border-t border-slate-700 pt-4 space-y-3">
+                    <label class="flex items-center gap-2 text-sm text-slate-300">
+                        <input id="traffic-alert-enabled" type="checkbox" class="h-4 w-4 accent-amber-400">
+                        用量達到門檻時發 Telegram 提醒
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">提醒門檻（%，用逗號分隔）
+                        <input id="traffic-alert-thresholds" class="form-input font-mono" placeholder="80,90,100" autocomplete="off">
+                    </label>
+                    <p class="text-[11px] text-slate-500" id="traffic-alert-hint">每個門檻在一個計費週期內只提醒一次，重置後重新計算。</p>
+                </div>
+                <button id="traffic-quota-save" class="w-full rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition">保存設定</button>
             </div>
         </div>
     </div>
@@ -410,8 +421,11 @@
 
         function bytesToQuotaInput(bytes) {
             const value = Number(bytes) || 0;
-            if (value >= 1099511627776 && value % 1099511627776 === 0) {
-                return { value: value / 1099511627776, unit: 'TB' };
+            const TB = 1099511627776;
+            if (value >= TB) {
+                // Show TB when the stored bytes came from a TB value with up to 2 decimals (e.g. 1.95 TB).
+                const tb = Number((value / TB).toFixed(2));
+                if (Math.round(tb * TB) === value) return { value: tb, unit: 'TB' };
             }
             return { value: value ? Number((value / 1073741824).toFixed(2)) : '', unit: 'GB' };
         }
@@ -433,6 +447,13 @@
             const bar = document.getElementById('traffic-quota-bar');
             const percentEl = document.getElementById('traffic-quota-percent');
             const detail = document.getElementById('traffic-quota-detail');
+            const resetEl = document.getElementById('traffic-quota-reset');
+            if (quota.days_left !== null && quota.days_left !== undefined && quota.reset_date) {
+                resetEl.textContent = `距離重置 ${quota.days_left} 天（${quota.reset_date.slice(5)}）`;
+                resetEl.classList.remove('hidden');
+            } else {
+                resetEl.classList.add('hidden');
+            }
             if (!quota.available) {
                 track.classList.add('hidden');
                 percentEl.textContent = '';
@@ -1062,6 +1083,11 @@
                 document.getElementById('traffic-quota-api-status').innerText = data.bandwagon_available
                     ? '已檢測到 Bandwagon 官方 API，面板會優先使用官方配額。'
                     : `未檢測到 Bandwagon 官方配額，將使用手動配額。${data.bandwagon_error ? `原因：${data.bandwagon_error}` : ''}`;
+                document.getElementById('traffic-alert-enabled').checked = data.traffic_alert_enabled !== false;
+                document.getElementById('traffic-alert-thresholds').value = data.traffic_alert_thresholds || '80,90,100';
+                document.getElementById('traffic-alert-hint').innerText = data.telegram_ready
+                    ? '每個門檻在一個計費週期內只提醒一次，重置後重新計算。'
+                    : '尚未設定 Telegram Bot Token / Chat ID，請先到「TG 推送」填寫，否則不會收到提醒。';
             } catch (e) {
                 document.getElementById('traffic-quota-api-status').innerText = '讀取配額設定失敗。';
                 console.error("Error fetching /api/traffic-quota:", e);
@@ -1070,26 +1096,26 @@
 
         async function saveTrafficQuotaSettings() {
             const status = document.getElementById('traffic-quota-status');
-            const quotaBytes = quotaInputToBytes();
-            if (quotaBytes <= 0) {
-                status.innerText = '請輸入大於 0 的手動月流量配額。';
-                return;
-            }
+            const quotaBytes = Math.max(0, quotaInputToBytes() || 0);
             try {
                 const res = await fetch('/api/traffic-quota', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({traffic_quota_bytes: quotaBytes})
+                    body: JSON.stringify({
+                        traffic_quota_bytes: quotaBytes,
+                        traffic_alert_enabled: document.getElementById('traffic-alert-enabled').checked,
+                        traffic_alert_thresholds: document.getElementById('traffic-alert-thresholds').value
+                    })
                 });
-                if (!res.ok) throw new Error(await res.text());
+                if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
                 const data = await res.json();
                 renderTrafficQuota(data.traffic_quota);
-                status.innerText = '已保存手動月流量配額。';
+                status.innerText = '已保存。';
                 await fetchTrafficQuotaSettings();
                 await fetchSummary();
                 closeModal('traffic-quota-modal');
             } catch (e) {
-                status.innerText = '保存失敗，請檢查流量配額。';
+                status.innerText = `保存失敗：${e.message.includes('threshold') ? '提醒門檻請填 1–200 之間的數字，用逗號分隔' : '請檢查流量配額'}`;
                 console.error("Error saving /api/traffic-quota:", e);
             }
         }

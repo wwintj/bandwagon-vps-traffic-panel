@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
@@ -114,12 +114,14 @@ async def lifespan(app: FastAPI):
     collector_task = asyncio.create_task(collector_instance.start())
     telegram_task = asyncio.create_task(telegram_daily_notifier())
     ddns_task = asyncio.create_task(ddns_background_updater())
+    alert_task = asyncio.create_task(traffic_alert_watcher())
     yield
     collector_instance.running = False
     collector_task.cancel()
     telegram_task.cancel()
     ddns_task.cancel()
-    for task in (collector_task, telegram_task, ddns_task):
+    alert_task.cancel()
+    for task in (collector_task, telegram_task, ddns_task, alert_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -183,6 +185,14 @@ def get_current_cycle_start(now):
     prev_year, prev_month = previous_month(now.year, now.month)
     prev_reset_day = clamp_day(prev_year, prev_month, MONTH_RESET_DAY)
     return datetime(prev_year, prev_month, prev_reset_day)
+
+def get_next_cycle_start(now):
+    start = get_current_cycle_start(now)
+    year, month = (start.year + 1, 1) if start.month == 12 else (start.year, start.month + 1)
+    return datetime(year, month, clamp_day(year, month, MONTH_RESET_DAY))
+
+def days_until(reset_date, today):
+    return max(0, (reset_date - today).days)
 
 def format_meta_time(value):
     if not value:
@@ -528,10 +538,15 @@ def fetch_bandwagon_info_cached(force=False):
     return data
 
 def get_traffic_quota_summary(summary):
+    today = timeutil.now().date()
     bw = fetch_bandwagon_info_cached()
     if bw and not bw.get("error") and bw.get("limit"):
         used = int(bw.get("used") or 0)
         limit = int(bw.get("limit") or 0)
+        try:
+            reset_date = timeutil.from_unix(bw.get("reset")).date() if bw.get("reset") else None
+        except (TypeError, ValueError, OSError):
+            reset_date = None
         return {
             "source": "bandwagon",
             "source_label": "Bandwagon 官方",
@@ -540,10 +555,13 @@ def get_traffic_quota_summary(summary):
             "percent": round((used / limit * 100) if limit else 0, 1),
             "available": True,
             "error": "",
+            "reset_date": reset_date.isoformat() if reset_date else "",
+            "days_left": days_until(reset_date, today) if reset_date else None,
         }
 
     used = int(summary.get("month_rx", 0) or 0) + int(summary.get("month_tx", 0) or 0)
     limit = int(TRAFFIC_QUOTA_BYTES or 0)
+    reset_date = get_next_cycle_start(timeutil.now()).date()
     return {
         "source": "manual",
         "source_label": "手動配額",
@@ -552,7 +570,72 @@ def get_traffic_quota_summary(summary):
         "percent": round((used / limit * 100) if limit else 0, 1),
         "available": bool(limit),
         "error": "" if limit else (bw.get("error") if bw and bw.get("error") else "尚未設定月流量配額"),
+        "reset_date": reset_date.isoformat(),
+        "days_left": days_until(reset_date, today),
     }
+
+def parse_alert_thresholds(text):
+    values = set()
+    for part in re.split(r"[,\s，、]+", str(text or "")):
+        if part.strip().isdigit():
+            value = int(part)
+            if 1 <= value <= 200:
+                values.add(value)
+    return sorted(values)
+
+def check_traffic_alert(quota):
+    """Send one Telegram alert when usage first crosses a threshold in the current billing cycle.
+    Returns the threshold that was announced, or None."""
+    if TRAFFIC_ALERT_ENABLED != "1" or not quota or not quota.get("available") or not quota.get("limit"):
+        return None
+    thresholds = parse_alert_thresholds(TRAFFIC_ALERT_THRESHOLDS)
+    if not thresholds:
+        return None
+    used, limit = int(quota["used"]), int(quota["limit"])
+    percent = used / limit * 100
+
+    # A new billing cycle (or a different quota source) starts with a clean slate.
+    cycle = f"{quota.get('source')}:{quota.get('reset_date', '')}"
+    if get_meta_value("traffic_alert_cycle", "") != cycle:
+        set_meta_value("traffic_alert_cycle", cycle)
+        set_meta_value("traffic_alert_sent", "")
+    sent = set(parse_alert_thresholds(get_meta_value("traffic_alert_sent", "")))
+
+    crossed = [t for t in thresholds if percent >= t]
+    fresh = [t for t in crossed if t not in sent]
+    if not fresh:
+        return None
+    # Crossing several at once (e.g. enabling alerts at 95%) sends only the highest.
+    top = max(fresh)
+    title = f"流量已用完（{percent:.1f}%）" if top >= 100 else f"流量預警：已使用 {percent:.1f}%"
+    lines = [
+        f"來源：{escape_html(quota.get('source_label', ''))}",
+        f"已用：<b>{format_bytes(used)}</b> / {format_bytes(limit)}",
+        f"剩餘：<b>{format_bytes(max(0, limit - used))}</b>",
+    ]
+    if quota.get("days_left") is not None:
+        lines.append(f"距離重置：<b>{quota['days_left']} 天</b>（{escape_html(quota.get('reset_date', ''))}）")
+    lines.append(f"已達提醒門檻 {top}%，本週期不會再重複提醒這一檔。")
+    if not send_telegram_notice(migration_telegram_message(title, lines)):
+        return None
+    set_meta_value("traffic_alert_sent", ",".join(str(t) for t in sorted(sent | set(crossed))))
+    return top
+
+def run_traffic_alert_check(pending):
+    summary = get_traffic_summary(pending)
+    return check_traffic_alert(summary.get("traffic_quota"))
+
+async def traffic_alert_watcher():
+    await asyncio.sleep(60)
+    while True:
+        if TRAFFIC_ALERT_ENABLED == "1" and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                await run_blocking(run_traffic_alert_check, collector_instance.snapshot_pending())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Traffic alert check failed: %s", exc)
+        await asyncio.sleep(600)
 
 def bandwagon_request(action, params=None):
     if not BANDWAGON_VEID or not BANDWAGON_API_KEY:
@@ -1013,6 +1096,7 @@ def build_telegram_message(pending=None):
         f"下載        <b>{format_bytes(summary['month_rx'])}</b>",
         f"上傳        <b>{format_bytes(summary['month_tx'])}</b>",
         f"重置日      每月 {summary['month_reset_day']} 日",
+        f"距離重置    {days_until(get_next_cycle_start(configured_now()).date(), configured_now().date())} 天",
         "",
         "<b>今日流量</b>",
         f"下載        {format_bytes(summary['today_rx'])}",
@@ -1034,6 +1118,10 @@ def build_telegram_message(pending=None):
             lines.append(f"使用率      <b>{percent:.1f}%</b>")
             if bw.get("reset"):
                 lines.append(f"重置        {escape_html(format_unix_time(bw['reset']))} {escape_html(TELEGRAM_TIMEZONE_LABEL)}")
+                try:
+                    lines.append(f"剩餘天數    <b>{days_until(timeutil.from_unix(bw['reset']).date(), configured_now().date())} 天</b>")
+                except (TypeError, ValueError, OSError):
+                    pass
             if bw.get("node"):
                 lines.append(f"節點        {escape_html(bw['node'])}")
 
@@ -1401,11 +1489,14 @@ async def api_get_traffic_quota(username: str = Depends(verify_auth)):
         "traffic_quota_bytes": TRAFFIC_QUOTA_BYTES,
         "bandwagon_available": bool(bw and not bw.get("error") and bw.get("limit")),
         "bandwagon_error": bw.get("error") if bw and bw.get("error") else "",
+        "traffic_alert_enabled": TRAFFIC_ALERT_ENABLED == "1",
+        "traffic_alert_thresholds": ",".join(str(t) for t in parse_alert_thresholds(TRAFFIC_ALERT_THRESHOLDS)),
+        "telegram_ready": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
 @app.post("/api/traffic-quota")
 async def api_update_traffic_quota(payload: dict, username: str = Depends(verify_auth)):
-    global TRAFFIC_QUOTA_BYTES
+    global TRAFFIC_QUOTA_BYTES, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS
 
     try:
         quota_bytes = int(payload.get("traffic_quota_bytes", 0))
@@ -1414,8 +1505,19 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
     if quota_bytes < 0:
         raise HTTPException(status_code=400, detail="Traffic quota cannot be negative")
 
+    updates = {"TRAFFIC_QUOTA_BYTES": quota_bytes}
+    if "traffic_alert_enabled" in payload:
+        TRAFFIC_ALERT_ENABLED = "1" if payload.get("traffic_alert_enabled") else "0"
+        updates["TRAFFIC_ALERT_ENABLED"] = TRAFFIC_ALERT_ENABLED
+    if "traffic_alert_thresholds" in payload:
+        thresholds = parse_alert_thresholds(payload.get("traffic_alert_thresholds"))
+        if not thresholds and TRAFFIC_ALERT_ENABLED == "1":
+            raise HTTPException(status_code=400, detail="Alert thresholds must be numbers between 1 and 200")
+        TRAFFIC_ALERT_THRESHOLDS = ",".join(str(t) for t in thresholds) or "80,90,100"
+        updates["TRAFFIC_ALERT_THRESHOLDS"] = TRAFFIC_ALERT_THRESHOLDS
+
     TRAFFIC_QUOTA_BYTES = quota_bytes
-    update_env_values({"TRAFFIC_QUOTA_BYTES": TRAFFIC_QUOTA_BYTES})
+    update_env_values(updates)
     summary = await run_blocking(get_traffic_summary, collector_instance.snapshot_pending())
     return {
         "ok": True,
