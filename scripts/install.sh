@@ -9,7 +9,9 @@ SERVICE_NAME="vps-traffic-panel"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NGINX_CONFIG_FILE="/etc/nginx/conf.d/${SERVICE_NAME}.conf"
-INSTALLER_VERSION="2026-05-29.3"
+INSTALLER_VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$PROJECT_ROOT/app/__init__.py" 2>/dev/null)"
+SERVICE_USER="vps-traffic-panel"
+PREVIOUS_INSTALL_BACKUP=""
 DEBUG_SSL=0
 
 for arg in "$@"; do
@@ -58,6 +60,9 @@ cleanup_previous_install() {
             local backup_dir="${dir}.old.${timestamp}"
             echo -e "${YELLOW}Moving previous install directory to: $backup_dir${RESET}"
             mv "$dir" "$backup_dir"
+            if [ "$dir" = "$install_dir" ] && [ -f "$backup_dir/data.db" ]; then
+                PREVIOUS_INSTALL_BACKUP="$backup_dir"
+            fi
         fi
     done
 }
@@ -360,6 +365,10 @@ EOF
         rm -f "$NGINX_CONFIG_FILE"
         HTTPS_MODE="none"
         SSL_ENABLED=0
+        # The service was bound to localhost for Nginx; expose it directly again so the panel stays reachable.
+        HOST="0.0.0.0"
+        sed -i -e "s/^HOST=.*/HOST=$HOST/" -e "s/^HTTPS_MODE=.*/HTTPS_MODE=none/" -e "s/^SSL_ENABLED=.*/SSL_ENABLED=0/" "$INSTALL_DIR/.env"
+        systemctl restart "$SERVICE_NAME"
     fi
 }
 
@@ -390,15 +399,21 @@ cleanup_previous_install "$INSTALL_DIR"
 PORT=$(choose_port)
 INTERFACE=""
 
-read -p "Login Username [admin]: " AUTH_USERNAME
-AUTH_USERNAME=${AUTH_USERNAME:-admin}
+while true; do
+    read -p "Login Username [admin]: " AUTH_USERNAME
+    AUTH_USERNAME=${AUTH_USERNAME:-admin}
+    if [[ "$AUTH_USERNAME" =~ ^[a-zA-Z0-9@_\.\!\%\-]+$ ]]; then
+        break
+    fi
+    echo -e "${RED}Error: Username may only contain letters, numbers and @ _ - . ! %${RESET}"
+done
 
 while true; do
     read -s -p "Login Password: " AUTH_PASSWORD
     echo ""
     
-    if [[ -z "$AUTH_PASSWORD" || "$AUTH_PASSWORD" == "admin" || "$AUTH_PASSWORD" == "password" || "$AUTH_PASSWORD" == "123456" ]]; then
-        echo -e "${RED}Error: Password cannot be empty or a weak default (admin/password/123456). Please enter a secure password.${RESET}"
+    if [[ ${#AUTH_PASSWORD} -lt 8 || "$AUTH_PASSWORD" == "password" || "$AUTH_PASSWORD" == "12345678" ]]; then
+        echo -e "${RED}Error: Password must be at least 8 characters and not a common default. Please enter a secure password.${RESET}"
         continue
     fi
     
@@ -427,6 +442,11 @@ fi
 
 detect_ssl_certificates
 
+# Behind the Nginx HTTPS proxy, keep the plain-HTTP backend off the public interface.
+if [ "$HTTPS_MODE" = "nginx" ]; then
+    HOST="127.0.0.1"
+fi
+
 echo -e "${GREEN}====================================${RESET}"
 echo -e "${GREEN}Install Summary${RESET}"
 echo -e "Install directory    : $INSTALL_DIR"
@@ -436,6 +456,7 @@ echo -e "Web port             : $PORT"
 echo -e "Network interface    : auto-detect"
 echo -e "Monthly reset day    : $MONTH_RESET_DAY"
 echo -e "HTTPS mode           : $HTTPS_MODE"
+[ -n "$PREVIOUS_INSTALL_BACKUP" ] && echo -e "Restore history from : $PREVIOUS_INSTALL_BACKUP/data.db"
 if [ "$SSL_ENABLED" -eq 1 ]; then
     echo -e "SSL certificate      : $SSL_CERTFILE"
     echo -e "SSL private key      : $SSL_KEYFILE"
@@ -457,7 +478,7 @@ apt-get install -y "${PACKAGES[@]}"
 echo -e "${YELLOW}Copying project files...${RESET}"
 mkdir -p "$INSTALL_DIR"
 
-rsync -av --exclude={'.git','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} "$PROJECT_ROOT/" "$INSTALL_DIR/"
+rsync -a --exclude={'.git','.github','tests','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} "$PROJECT_ROOT/" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR"/scripts/*.sh
 
 cd "$INSTALL_DIR"
@@ -501,6 +522,22 @@ PANEL_DOMAIN=$PANEL_DOMAIN
 EOF
 chmod 600 .env
 
+if [ -n "$PREVIOUS_INSTALL_BACKUP" ]; then
+    echo -e "${YELLOW}Restoring traffic history from $PREVIOUS_INSTALL_BACKUP/data.db ...${RESET}"
+    sqlite3 "$PREVIOUS_INSTALL_BACKUP/data.db" ".backup '$INSTALL_DIR/data.db'" || cp "$PREVIOUS_INSTALL_BACKUP/data.db" "$INSTALL_DIR/data.db"
+fi
+
+# Direct uvicorn HTTPS needs to read private keys that are usually root-only; otherwise run unprivileged.
+if [ "$HTTPS_MODE" = "uvicorn" ]; then
+    RUN_USER="root"
+else
+    RUN_USER="$SERVICE_USER"
+    if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        useradd --system --no-create-home --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+fi
+
 echo -e "${YELLOW}Configuring systemd service...${RESET}"
 if [ "$HTTPS_MODE" = "uvicorn" ]; then
     EXEC_START="$INSTALL_DIR/venv/bin/uvicorn app.main:app --host \$HOST --port \$PORT --ssl-certfile \$SSL_CERTFILE --ssl-keyfile \$SSL_KEYFILE"
@@ -514,12 +551,14 @@ Description=VPS Traffic Panel
 After=network.target
 
 [Service]
-User=root
+User=$RUN_USER
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$EXEC_START
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -550,6 +589,8 @@ fi
 echo -e "Check service status : systemctl status $SERVICE_NAME"
 echo -e "View running logs    : journalctl -u $SERVICE_NAME -f"
 echo -e "Install directory    : $INSTALL_DIR"
+echo -e "Panel version        : v$INSTALLER_VERSION"
+echo -e "Service user         : $RUN_USER"
 echo -e "Bind address         : $HOST"
 echo -e "Public IP            : $PUBLIC_IP"
 echo -e "Web port             : $PORT"

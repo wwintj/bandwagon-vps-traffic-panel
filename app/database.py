@@ -1,9 +1,9 @@
 import sqlite3
 import os
-from datetime import datetime
-from app.config import BASE_DIR
+from app.config import DATA_DIR
+from app import timeutil
 
-DB_PATH = os.path.join(BASE_DIR, 'data.db')
+DB_PATH = os.path.join(DATA_DIR, 'data.db')
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
@@ -37,7 +37,7 @@ def init_db():
     cursor.execute('SELECT value FROM meta_info WHERE key = "install_time"')
     if not cursor.fetchone():
         cursor.execute('INSERT INTO meta_info (key, value) VALUES (?, ?)', 
-                       ('install_time', datetime.now().isoformat()))
+                       ('install_time', timeutil.now().isoformat()))
     conn.commit()
     conn.close()
 

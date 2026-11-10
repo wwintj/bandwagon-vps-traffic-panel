@@ -2,12 +2,15 @@ import os
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+# .env and data.db live here; defaults to the install directory. Tests point it elsewhere.
+DATA_DIR = os.getenv("VPS_PANEL_DATA_DIR") or BASE_DIR
+ENV_PATH = os.path.join(DATA_DIR, ".env")
+load_dotenv(ENV_PATH)
 
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", 8088))
 AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "admin")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")
 INTERFACE = os.getenv("INTERFACE", "")
 PANEL_TITLE = os.getenv("PANEL_TITLE", "VPS 監控流量面板")
 PANEL_SUBTITLE = os.getenv("PANEL_SUBTITLE", "Tim哥在三更半夜改好的")

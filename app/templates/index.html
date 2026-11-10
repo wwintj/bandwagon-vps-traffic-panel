@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ panel_title }}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <script src="/static/tailwindcss-3.4.16.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js" integrity="sha384-o5uz97et3bErHvpKfD4Jz4n0JfhJDWABFuF4NP+iEEDxE1VwMWJ19QGR0lqFZnr6" crossorigin="anonymous"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
         body { background-color: #0b1120; color: #f8fafc; font-family: "JetBrains Mono", "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC", monospace, sans-serif; }
@@ -148,7 +148,7 @@
             <div class="flex items-start justify-between gap-4 mb-5">
                 <div>
                     <h2 class="text-lg font-bold text-slate-100">修改登入資訊</h2>
-                    <p class="text-xs text-slate-500 mt-1" id="auth-settings-status">密碼留空則只修改用戶名</p>
+                    <p class="text-xs text-slate-500 mt-1" id="auth-settings-status">密碼留空則只修改用戶名；新密碼至少 8 位</p>
                 </div>
                 <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="auth-modal">&times;</button>
             </div>
@@ -156,7 +156,7 @@
                 <label class="block text-xs text-slate-400 uppercase">登入用戶名
                     <input id="settings-username" class="form-input" autocomplete="username">
                 </label>
-                <label class="block text-xs text-slate-400 uppercase">新密碼（留空不修改）
+                <label class="block text-xs text-slate-400 uppercase">新密碼（至少 8 位，留空不修改）
                     <input id="settings-password" type="password" class="form-input" autocomplete="new-password">
                 </label>
                 <button id="auth-settings-save" class="w-full rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-sm py-2.5 transition">保存登入資訊</button>
@@ -235,7 +235,7 @@
             <div class="flex items-start justify-between gap-4 mb-5">
                 <div>
                     <h2 class="text-lg font-bold text-slate-100">Telegram 推送設定</h2>
-                    <p class="text-xs text-slate-500 mt-1" id="telegram-status">每天按所選時區推送一次流量摘要</p>
+                    <p class="text-xs text-slate-500 mt-1" id="telegram-status">每天按所選時區推送一次流量摘要；今日 / 本期統計也按此時區切日</p>
                 </div>
                 <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="telegram-modal">&times;</button>
             </div>
@@ -251,7 +251,7 @@
                     <input id="telegram-chat-id" class="form-input" autocomplete="off">
                 </label>
                 <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_5rem_5rem] gap-4">
-                    <label class="block text-xs text-slate-400 uppercase">推送時區
+                    <label class="block text-xs text-slate-400 uppercase">面板時區（統計與推送）
                         <select id="telegram-timezone" class="form-input font-mono"></select>
                     </label>
                     <label class="block text-xs text-slate-400 uppercase">小時
@@ -342,7 +342,7 @@
     </div>
 
     <footer class="mt-8 pt-6 border-t border-slate-700 text-slate-500 text-xs text-center space-y-1 pb-8">
-        <p>總下載: <strong class="text-emerald-400 font-mono" id="total-rx">0 B</strong> | 總上傳: <strong class="text-blue-400 font-mono" id="total-tx">0 B</strong> | 總流量統計起點: <strong class="text-slate-300 font-mono" id="total-since">...</strong> | 網卡: <strong id="footer-iface">{{ interface }}</strong> | 維護者 <strong>Tim</strong></p>
+        <p>總下載: <strong class="text-emerald-400 font-mono" id="total-rx">0 B</strong> | 總上傳: <strong class="text-blue-400 font-mono" id="total-tx">0 B</strong> | 總流量統計起點: <strong class="text-slate-300 font-mono" id="total-since">...</strong> | 網卡: <strong id="footer-iface">{{ interface }}</strong> | 維護者 <strong>Tim</strong> | <span class="font-mono">v{{ version }}</span></p>
         <p>本機 IP: <strong class="text-slate-300 font-mono" id="client-ip">...</strong> | 位置: <strong class="text-slate-300" id="client-location">...</strong> | 經緯度: <strong class="text-slate-300 font-mono" id="client-coordinates">...</strong> | 時區: <strong class="text-slate-300 font-mono" id="client-timezone">...</strong> | 網路: <strong class="text-cyan-300" id="client-access-type">...</strong></p>
     </footer>
 
@@ -386,6 +386,14 @@
             if (lat === null || lat === undefined || lon === null || lon === undefined) return 'Unknown';
             return `${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}`;
         }
+
+        // Every API call carries this header; the server rejects POSTs without it (CSRF guard).
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = (input, init = {}) => {
+            const headers = new Headers(init.headers || {});
+            headers.set('X-Panel-Request', '1');
+            return nativeFetch(input, { ...init, headers });
+        };
 
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
@@ -802,7 +810,9 @@
                 status.innerText = mode === 'auth' ? '已保存。請重新開啟頁面並用新帳密登入。' : '已保存，面板文字已更新。';
                 closeModal(mode === 'auth' ? 'auth-modal' : 'panel-modal');
             } catch (e) {
-                status.innerText = '保存失敗，請檢查用戶名、密碼或文案是否有效。';
+                status.innerText = mode === 'auth'
+                    ? '保存失敗：用戶名 / 密碼只能包含字母、數字與 @ _ - . ! %，新密碼至少 8 位。'
+                    : '保存失敗，標題與副標題不能為空。';
                 console.error("Error saving /api/settings:", e);
             }
         }

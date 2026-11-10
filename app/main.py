@@ -10,34 +10,105 @@ import re
 import socket
 import urllib.request
 import urllib.parse
+import hashlib
+import ipaddress
+from collections import deque
 from datetime import datetime, timedelta
 from calendar import monthrange
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+import logging
+import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
+from app import timeutil
+from app import __version__
 
 security = HTTPBasic()
 
-def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
+logger = logging.getLogger("uvicorn.error")
+
+TRUSTED_PROXIES = {"127.0.0.1", "::1"}
+AUTH_FAILURE_WINDOW = 15 * 60
+AUTH_FAILURE_LIMIT = 10
+AUTH_FAILURES = {}
+
+def get_client_ip(request: Request):
+    """Real client IP. Proxy headers are only trusted when the request comes from a local reverse proxy."""
+    peer = request.client.host if request.client else ""
+    if peer in TRUSTED_PROXIES:
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if real_ip:
+            return real_ip
+        forwarded_for = request.headers.get("x-forwarded-for", "")
+        if forwarded_for:
+            # Nginx appends the connecting address last; earlier entries are client-supplied.
+            return forwarded_for.split(",")[-1].strip()
+    return peer or "Unknown"
+
+def _recent_auth_failures(client_ip, now):
+    failures = AUTH_FAILURES.get(client_ip)
+    if failures is None:
+        return None
+    while failures and now - failures[0][0] > AUTH_FAILURE_WINDOW:
+        failures.popleft()
+    if not failures:
+        AUTH_FAILURES.pop(client_ip, None)
+        return None
+    return failures
+
+def is_auth_locked(client_ip):
+    failures = _recent_auth_failures(client_ip, time.time())
+    # Count distinct wrong credentials, so a browser retrying one stale password while polling
+    # does not lock its owner out; guessing many passwords does.
+    return bool(failures) and len({digest for _ts, digest in failures}) >= AUTH_FAILURE_LIMIT
+
+def record_auth_failure(client_ip, username, password):
+    now = time.time()
+    if len(AUTH_FAILURES) > 10000:
+        AUTH_FAILURES.clear()
+    failures = _recent_auth_failures(client_ip, now)
+    if failures is None:
+        failures = AUTH_FAILURES.setdefault(client_ip, deque(maxlen=200))
+    digest = hashlib.sha256(f"{username}\0{password}".encode("utf-8")).hexdigest()[:16]
+    failures.append((now, digest))
+
+def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+    client_ip = get_client_ip(request)
+    if is_auth_locked(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed logins. Try again in 15 minutes.",
+        )
+    if not AUTH_USERNAME or not AUTH_PASSWORD:
+        # Missing credentials in .env must lock the panel, never fall back to a default password.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AUTH_USERNAME / AUTH_PASSWORD is not configured in .env",
+        )
     is_user_ok = secrets.compare_digest(credentials.username.encode("utf8"), AUTH_USERNAME.encode("utf8"))
     is_pass_ok = secrets.compare_digest(credentials.password.encode("utf8"), AUTH_PASSWORD.encode("utf8"))
     
     if not (is_user_ok and is_pass_ok):
+        record_auth_failure(client_ip, credentials.username, credentials.password)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Basic"},
         )
+    AUTH_FAILURES.pop(client_ip, None)
     return credentials.username
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not AUTH_USERNAME or not AUTH_PASSWORD:
+        logger.error("AUTH_USERNAME / AUTH_PASSWORD is empty; the panel will reject all logins until .env is fixed.")
     init_db()
     collector_task = asyncio.create_task(collector_instance.start())
     telegram_task = asyncio.create_task(telegram_daily_notifier())
@@ -54,8 +125,18 @@ async def lifespan(app: FastAPI):
             pass
 
 app = FastAPI(lifespan=lifespan)
+
+CSRF_HEADER = "x-panel-request"
+
+@app.middleware("http")
+async def csrf_guard(request: Request, call_next):
+    # Browsers resend cached Basic Auth credentials on cross-site form posts. A custom header
+    # cannot be set by a plain form, and cross-origin fetch with it needs a CORS preflight we never allow.
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(CSRF_HEADER) != "1":
+        return JSONResponse({"detail": "Missing X-Panel-Request header"}, status_code=403)
+    return await call_next(request)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app/templates"))
-ENV_PATH = os.path.join(BASE_DIR, ".env")
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "app/static")), name="static")
 SYSTEM_INFO_CACHE = {"public_ip": None, "ip_info": None, "updated_at": 0}
 IP_LOOKUP_CACHE = {}
 BANDWAGON_INFO_CACHE = {"data": None, "updated_at": 0}
@@ -85,7 +166,7 @@ def previous_month(year, month):
     return year, month - 1
 
 def recent_months(count):
-    now = datetime.now()
+    now = timeutil.now()
     months = []
     year, month = now.year, now.month
     for _ in range(count):
@@ -111,7 +192,8 @@ def format_meta_time(value):
         return value
 
 def format_env_value(value):
-    value = str(value)
+    # Values are single-line; drop embedded newlines so one setting can never spill into another key.
+    value = str(value).replace("\r", "").replace("\n", "")
     if any(ch.isspace() for ch in value) or "#" in value or '"' in value:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
@@ -140,9 +222,36 @@ def update_env_values(updates):
         if key not in order:
             order.append(key)
 
-    with open(ENV_PATH, "w", encoding="utf-8") as f:
-        for key in order:
-            f.write(f"{key}={format_env_value(existing[key])}\n")
+    # Write to a temp file and rename, so a crash or full disk never leaves a truncated .env behind.
+    env_dir = os.path.dirname(ENV_PATH)
+    fd, tmp_path = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=env_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for key in order:
+                f.write(f"{key}={format_env_value(existing[key])}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, ENV_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+def mask_secret(value):
+    value = str(value or "")
+    if not value:
+        return ""
+    return "********" + (value[-4:] if len(value) > 12 else "")
+
+def resolve_secret(submitted, current):
+    """Keep the stored secret when the browser sends back the masked placeholder."""
+    submitted = str(submitted or "").strip()
+    if current and submitted == mask_secret(current):
+        return current
+    return submitted
 
 def is_safe_auth_value(value):
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@_.!%-")
@@ -263,7 +372,8 @@ def get_cached_public_ip_info(force=False):
         return SYSTEM_INFO_CACHE["public_ip"], SYSTEM_INFO_CACHE["ip_info"]
 
     try:
-        public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf-8')
+        public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf-8').strip()
+        ipaddress.ip_address(public_ip)
     except Exception:
         public_ip = "Unknown"
 
@@ -292,7 +402,7 @@ def format_unix_time(value):
         timestamp = int(value)
         if timestamp <= 0:
             return ""
-        return (datetime.utcfromtimestamp(timestamp) + timedelta(hours=TELEGRAM_TIMEZONE_OFFSET)).strftime("%Y-%m-%d %H:%M")
+        return timeutil.from_unix(timestamp).strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError, OSError):
         return str(value or "")
 
@@ -307,8 +417,11 @@ def request_json(url, method="GET", payload=None, headers=None, timeout=10):
         raw = response.read().decode("utf-8")
     return json.loads(raw) if raw else {}
 
-def get_traffic_summary():
-    now = datetime.now()
+def get_traffic_summary(pending=None):
+    """Blocking (SQLite + Bandwagon API). Call via run_blocking with collector_instance.snapshot_pending()."""
+    if pending is None:
+        pending = {}
+    now = timeutil.now()
     conn = get_db()
     cursor = conn.cursor()
 
@@ -331,7 +444,7 @@ def get_traffic_summary():
     total_rx, total_tx = (row[0] or 0), (row[1] or 0)
     conn.close()
 
-    for (y, m, d, h), traffic in collector_instance.pending_buckets.items():
+    for (y, m, d, h), traffic in pending.items():
         if y == now.year and m == now.month and d == now.day:
             today_rx += traffic["rx"]
             today_tx += traffic["tx"]
@@ -621,7 +734,8 @@ def build_migration_status():
     current_ip, _ = get_cached_public_ip_info(force=True)
     old_ip = meta["old_ip"]
     new_ip = meta["new_ip"]
-    ip_changed = bool(old_ip and current_ip != "Unknown" and current_ip != old_ip)
+    old_ip_known = bool(old_ip) and old_ip != "Unknown"
+    ip_changed = bool(old_ip_known and current_ip != "Unknown" and current_ip != old_ip)
     if ip_changed and not new_ip:
         new_ip = current_ip
         set_meta_value("migration_new_ip", new_ip)
@@ -713,7 +827,7 @@ def sync_cloudflare_ddns():
     if not result.get("success"):
         raise ValueError(result.get("errors") or "Cloudflare 更新 DNS 記錄失敗")
     set_meta_value("cloudflare_ddns_last_ip", public_ip)
-    set_meta_value("cloudflare_ddns_last_sync", datetime.now().isoformat())
+    set_meta_value("cloudflare_ddns_last_sync", timeutil.now().isoformat())
     return {"ok": True, "action": action, "ip": public_ip, "record": CLOUDFLARE_RECORD_NAME}
 
 async def ddns_background_updater():
@@ -722,17 +836,18 @@ async def ddns_background_updater():
             await asyncio.sleep(600)
             if CLOUDFLARE_DDNS_ENABLED != "1":
                 continue
-            public_ip, _ = get_cached_public_ip_info()
+            public_ip, _ = await run_blocking(get_cached_public_ip_info)
             if public_ip == "Unknown" or public_ip == get_meta_value("cloudflare_ddns_last_ip", ""):
                 continue
             await run_blocking(sync_cloudflare_ddns)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning("Cloudflare DDNS update failed: %s", exc)
             await asyncio.sleep(600)
 
-def build_telegram_message():
-    summary = get_traffic_summary()
+def build_telegram_message(pending=None):
+    summary = get_traffic_summary(pending)
     ip, ip_info = get_cached_public_ip_info()
     location = " / ".join(filter(None, [ip_info.get('country'), ip_info.get('regionName'), ip_info.get('city')])) or "Unknown"
     now = configured_now().strftime("%Y-%m-%d %H:%M")
@@ -786,6 +901,25 @@ def send_telegram_message(text):
     with urllib.request.urlopen(req, timeout=8) as response:
         return json.loads(response.read().decode("utf-8"))
 
+def send_daily_report(pending):
+    return send_telegram_message(build_telegram_message(pending))
+
+def mark_today_sent_if_past_push_time():
+    """After settings change, don't fire a surprise catch-up report for a push time already passed today."""
+    now = configured_now()
+    if (now.hour, now.minute) > (TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE):
+        set_meta_value("telegram_last_daily", now.strftime("%Y-%m-%d"))
+
+TELEGRAM_CATCHUP = timedelta(hours=2)
+
+def should_send_daily_report(now, last_sent_day):
+    """True from the push time until TELEGRAM_CATCHUP later, once per day. The window means a late
+    loop tick or a failed send is retried instead of silently skipping the whole day."""
+    target = now.replace(hour=TELEGRAM_PUSH_HOUR, minute=TELEGRAM_PUSH_MINUTE, second=0, microsecond=0)
+    if now < target or now - target > TELEGRAM_CATCHUP:
+        return False
+    return last_sent_day != now.strftime("%Y-%m-%d")
+
 def send_telegram_message_if_ready(text):
     if TELEGRAM_ENABLED != "1" or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
@@ -796,34 +930,33 @@ def send_telegram_message_if_ready(text):
         return False
 
 def configured_now():
-    return datetime.utcnow() + timedelta(hours=TELEGRAM_TIMEZONE_OFFSET)
+    return timeutil.now()
 
 async def telegram_daily_notifier():
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
             if TELEGRAM_ENABLED != "1" or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
                 continue
             now = configured_now()
-            if now.hour != TELEGRAM_PUSH_HOUR or now.minute != TELEGRAM_PUSH_MINUTE:
+            if not should_send_daily_report(now, get_meta_value("telegram_last_daily")):
                 continue
             today_key = now.strftime("%Y-%m-%d")
-            if get_meta_value("telegram_last_daily") == today_key:
-                continue
-            await run_blocking(send_telegram_message, build_telegram_message())
+            await run_blocking(send_daily_report, collector_instance.snapshot_pending())
             set_meta_value("telegram_last_daily", today_key)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            logger.warning("Telegram daily report failed, will retry: %s", exc)
             await asyncio.sleep(300)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, username: str = Depends(verify_auth)):
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "interface": collector_instance.interface,
         "panel_title": PANEL_TITLE,
         "panel_subtitle": PANEL_SUBTITLE,
+        "version": __version__,
     })
 
 @app.get("/logout")
@@ -855,6 +988,8 @@ async def api_update_settings(payload: dict, username: str = Depends(verify_auth
         raise HTTPException(status_code=400, detail="Invalid username")
     if new_password and not is_safe_auth_value(new_password):
         raise HTTPException(status_code=400, detail="Invalid password")
+    if new_password and len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if not new_title or not new_subtitle:
         raise HTTPException(status_code=400, detail="Panel title and subtitle cannot be empty")
 
@@ -880,13 +1015,13 @@ async def api_get_telegram_settings(username: str = Depends(verify_auth)):
     return {
         "telegram_enabled": TELEGRAM_ENABLED == "1",
         "telegram_chat_id": TELEGRAM_CHAT_ID,
-        "telegram_bot_token": TELEGRAM_BOT_TOKEN,
+        "telegram_bot_token": mask_secret(TELEGRAM_BOT_TOKEN),
         "telegram_push_hour": TELEGRAM_PUSH_HOUR,
         "telegram_push_minute": TELEGRAM_PUSH_MINUTE,
         "telegram_timezone_offset": TELEGRAM_TIMEZONE_OFFSET,
         "telegram_timezone_label": TELEGRAM_TIMEZONE_LABEL,
         "bandwagon_veid": BANDWAGON_VEID,
-        "bandwagon_api_key": BANDWAGON_API_KEY,
+        "bandwagon_api_key": mask_secret(BANDWAGON_API_KEY),
     }
 
 @app.post("/api/telegram-settings")
@@ -894,7 +1029,7 @@ async def api_update_telegram_settings(payload: dict, username: str = Depends(ve
     global TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY
 
     TELEGRAM_ENABLED = "1" if payload.get("telegram_enabled") else "0"
-    TELEGRAM_BOT_TOKEN = str(payload.get("telegram_bot_token", "")).strip()
+    TELEGRAM_BOT_TOKEN = resolve_secret(payload.get("telegram_bot_token", ""), TELEGRAM_BOT_TOKEN)
     TELEGRAM_CHAT_ID = str(payload.get("telegram_chat_id", "")).strip()
     try:
         TELEGRAM_PUSH_HOUR = int(payload.get("telegram_push_hour", 20))
@@ -911,9 +1046,10 @@ async def api_update_telegram_settings(payload: dict, username: str = Depends(ve
     except (TypeError, ValueError):
         TELEGRAM_TIMEZONE_OFFSET = 8
     TELEGRAM_TIMEZONE_OFFSET = max(-12, min(14, TELEGRAM_TIMEZONE_OFFSET))
+    timeutil.set_offset(TELEGRAM_TIMEZONE_OFFSET)
     TELEGRAM_TIMEZONE_LABEL = str(payload.get("telegram_timezone_label", "中國時間")).strip() or "自訂時區"
     BANDWAGON_VEID = str(payload.get("bandwagon_veid", "")).strip()
-    BANDWAGON_API_KEY = str(payload.get("bandwagon_api_key", "")).strip()
+    BANDWAGON_API_KEY = resolve_secret(payload.get("bandwagon_api_key", ""), BANDWAGON_API_KEY)
     BANDWAGON_INFO_CACHE["data"] = None
     BANDWAGON_INFO_CACHE["updated_at"] = 0
 
@@ -928,12 +1064,13 @@ async def api_update_telegram_settings(payload: dict, username: str = Depends(ve
         "BANDWAGON_VEID": BANDWAGON_VEID,
         "BANDWAGON_API_KEY": BANDWAGON_API_KEY,
     })
+    mark_today_sent_if_past_push_time()
     return {"ok": True}
 
 @app.post("/api/telegram-test")
 async def api_telegram_test(username: str = Depends(verify_auth)):
     try:
-        await run_blocking(send_telegram_message, build_telegram_message())
+        await run_blocking(send_daily_report, collector_instance.snapshot_pending())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
@@ -944,7 +1081,7 @@ async def api_get_ddns_settings(username: str = Depends(verify_auth)):
         "cloudflare_ddns_enabled": CLOUDFLARE_DDNS_ENABLED == "1",
         "cloudflare_zone_id": CLOUDFLARE_ZONE_ID,
         "cloudflare_record_name": CLOUDFLARE_RECORD_NAME,
-        "cloudflare_api_token": CLOUDFLARE_API_TOKEN,
+        "cloudflare_api_token": mask_secret(CLOUDFLARE_API_TOKEN),
         "cloudflare_proxied": CLOUDFLARE_PROXIED == "1",
         "last_ip": get_meta_value("cloudflare_ddns_last_ip", ""),
         "last_sync": format_meta_time(get_meta_value("cloudflare_ddns_last_sync", "")),
@@ -955,7 +1092,7 @@ async def api_update_ddns_settings(payload: dict, username: str = Depends(verify
     global CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED
 
     CLOUDFLARE_DDNS_ENABLED = "1" if payload.get("cloudflare_ddns_enabled") else "0"
-    CLOUDFLARE_API_TOKEN = str(payload.get("cloudflare_api_token", "")).strip()
+    CLOUDFLARE_API_TOKEN = resolve_secret(payload.get("cloudflare_api_token", ""), CLOUDFLARE_API_TOKEN)
     CLOUDFLARE_ZONE_ID = str(payload.get("cloudflare_zone_id", "")).strip()
     CLOUDFLARE_RECORD_NAME = str(payload.get("cloudflare_record_name", "")).strip()
     CLOUDFLARE_PROXIED = "1" if payload.get("cloudflare_proxied") else "0"
@@ -977,13 +1114,13 @@ async def api_ddns_sync(username: str = Depends(verify_auth)):
 
 @app.get("/api/bandwagon-settings")
 async def api_get_bandwagon_settings(username: str = Depends(verify_auth)):
-    return {"bandwagon_veid": BANDWAGON_VEID, "bandwagon_api_key": BANDWAGON_API_KEY}
+    return {"bandwagon_veid": BANDWAGON_VEID, "bandwagon_api_key": mask_secret(BANDWAGON_API_KEY)}
 
 @app.post("/api/bandwagon-settings")
 async def api_update_bandwagon_settings(payload: dict, username: str = Depends(verify_auth)):
     global BANDWAGON_VEID, BANDWAGON_API_KEY
     BANDWAGON_VEID = str(payload.get("bandwagon_veid", "")).strip()
-    BANDWAGON_API_KEY = str(payload.get("bandwagon_api_key", "")).strip()
+    BANDWAGON_API_KEY = resolve_secret(payload.get("bandwagon_api_key", ""), BANDWAGON_API_KEY)
     BANDWAGON_INFO_CACHE["data"] = None
     BANDWAGON_INFO_CACHE["updated_at"] = 0
     update_env_values({"BANDWAGON_VEID": BANDWAGON_VEID, "BANDWAGON_API_KEY": BANDWAGON_API_KEY})
@@ -1004,7 +1141,7 @@ async def api_bandwagon_locations(username: str = Depends(verify_auth)):
                 service_info = await run_blocking(fetch_bandwagon_info)
                 if service_info and not service_info.get("error"):
                     current_location = match_current_location_label(service_info.get("node"), locations)
-                return {"ok": True, "locations": locations, "current_location": current_location, "raw": data}
+                return {"ok": True, "locations": locations, "current_location": current_location}
         except Exception as exc:
             errors.append(str(exc))
     raise HTTPException(status_code=400, detail="無法讀取可切換機房：" + "；".join(errors))
@@ -1016,9 +1153,15 @@ async def api_bandwagon_migrate(payload: dict, username: str = Depends(verify_au
     if not location:
         raise HTTPException(status_code=400, detail="請先選擇機房")
 
-    old_ip, _ = get_cached_public_ip_info(force=True)
+    last_known_ip = SYSTEM_INFO_CACHE.get("public_ip")
+    old_ip, _ = await run_blocking(get_cached_public_ip_info, True)
+    if old_ip == "Unknown" and last_known_ip and last_known_ip != "Unknown":
+        old_ip = last_known_ip
+    if old_ip == "Unknown":
+        # Without the current IP we cannot tell when the migration finished; refuse instead of guessing.
+        raise HTTPException(status_code=503, detail="暫時無法取得目前公網 IP，請稍後再試")
     set_meta_value("migration_active", "1")
-    set_meta_value("migration_started_at", datetime.now().isoformat())
+    set_meta_value("migration_started_at", timeutil.now().isoformat())
     set_meta_value("migration_target", location_label)
     set_meta_value("migration_old_ip", old_ip)
     set_meta_value("migration_new_ip", "")
@@ -1056,7 +1199,7 @@ async def api_reset_traffic(username: str = Depends(verify_auth)):
     cursor.execute('DELETE FROM hourly_traffic')
     conn.commit()
     conn.close()
-    reset_time = datetime.now().isoformat()
+    reset_time = timeutil.now().isoformat()
     set_meta_value("install_time", reset_time)
     return {"ok": True, "total_since": format_meta_time(reset_time)}
 
@@ -1078,7 +1221,7 @@ async def api_update_reset_day(payload: dict, username: str = Depends(verify_aut
 
 @app.get("/api/traffic-quota")
 async def api_get_traffic_quota(username: str = Depends(verify_auth)):
-    bw = fetch_bandwagon_info_cached()
+    bw = await run_blocking(fetch_bandwagon_info_cached)
     return {
         "traffic_quota_bytes": TRAFFIC_QUOTA_BYTES,
         "bandwagon_available": bool(bw and not bw.get("error") and bw.get("limit")),
@@ -1098,7 +1241,7 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
 
     TRAFFIC_QUOTA_BYTES = quota_bytes
     update_env_values({"TRAFFIC_QUOTA_BYTES": TRAFFIC_QUOTA_BYTES})
-    summary = get_traffic_summary()
+    summary = await run_blocking(get_traffic_summary, collector_instance.snapshot_pending())
     return {
         "ok": True,
         "traffic_quota_bytes": TRAFFIC_QUOTA_BYTES,
@@ -1114,19 +1257,13 @@ async def api_realtime(username: str = Depends(verify_auth)):
 
 @app.get("/api/ping")
 async def api_ping(username: str = Depends(verify_auth)):
-    return {"ok": True, "server_time": datetime.now().isoformat()}
+    return {"ok": True, "server_time": timeutil.now().isoformat(), "version": __version__}
 
-@app.get("/api/system")
-async def api_system(request: Request, username: str = Depends(verify_auth)):
+def build_system_info(client_ip):
+    """Blocking: public IP lookups, ip-api calls and a 0.1s CPU sample. Run via run_blocking."""
     ip, ip_info = get_cached_public_ip_info()
-
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    client_ip = forwarded_for.split(",", 1)[0].strip() if forwarded_for else ""
-    if not client_ip and request.client:
-        client_ip = request.client.host
-    client_ip = client_ip or "Unknown"
     client_ip_info = lookup_ip_info(client_ip)
-    
+
     uptime = "Unknown"
     try:
         with open('/proc/uptime', 'r') as f:
@@ -1134,10 +1271,10 @@ async def api_system(request: Request, username: str = Depends(verify_auth)):
             uptime = str(timedelta(seconds=int(uptime_seconds)))
     except Exception:
         pass
-        
+
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    
+
     return {
         "public_ip": ip,
         "client_ip": client_ip,
@@ -1166,30 +1303,55 @@ async def api_system(request: Request, username: str = Depends(verify_auth)):
         "os_version": get_os_pretty_name(),
         "kernel_release": platform.release(),
         "kernel_version": platform.version(),
-        "interface": collector_instance.interface,
-        "interface_status": collector_instance.interface_status
     }
+
+@app.get("/api/system")
+async def api_system(request: Request, username: str = Depends(verify_auth)):
+    info = await run_blocking(build_system_info, get_client_ip(request))
+    info["interface"] = collector_instance.interface
+    info["interface_status"] = collector_instance.interface_status
+    return info
 
 @app.get("/api/summary")
 async def api_summary(username: str = Depends(verify_auth)):
-    return get_traffic_summary()
+    return await run_blocking(get_traffic_summary, collector_instance.snapshot_pending())
 
 @app.get("/api/hourly")
 async def api_hourly(username: str = Depends(verify_auth)):
+    current_hour = timeutil.now().replace(minute=0, second=0, microsecond=0)
+    hours = [current_hour - timedelta(hours=offset) for offset in range(23, -1, -1)]
+    data_by_hour = {
+        (h.year, h.month, h.day, h.hour): {
+            "year": h.year, "month": h.month, "day": h.day, "hour": h.hour,
+            "rx_bytes": 0, "tx_bytes": 0,
+        }
+        for h in hours
+    }
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT year, month, day, hour, rx_bytes, tx_bytes 
-        FROM hourly_traffic 
-        ORDER BY year DESC, month DESC, day DESC, hour DESC LIMIT 24
-    ''')
-    data = [dict(row) for row in cursor.fetchall()][::-1]
+        SELECT year, month, day, hour, rx_bytes, tx_bytes
+        FROM hourly_traffic
+        WHERE datetime(printf('%04d-%02d-%02d %02d:00:00', year, month, day, hour)) >= datetime(?)
+    ''', (hours[0].strftime('%Y-%m-%d %H:%M:%S'),))
+    for row in cursor.fetchall():
+        key = (row["year"], row["month"], row["day"], row["hour"])
+        if key in data_by_hour:
+            data_by_hour[key]["rx_bytes"] += row["rx_bytes"] or 0
+            data_by_hour[key]["tx_bytes"] += row["tx_bytes"] or 0
     conn.close()
-    return data
+
+    for key, traffic in collector_instance.pending_buckets.items():
+        if key in data_by_hour:
+            data_by_hour[key]["rx_bytes"] += traffic["rx"]
+            data_by_hour[key]["tx_bytes"] += traffic["tx"]
+
+    return [data_by_hour[(h.year, h.month, h.day, h.hour)] for h in hours]
 
 @app.get("/api/daily")
 async def api_daily(username: str = Depends(verify_auth)):
-    today = datetime.now().date()
+    today = timeutil.now().date()
     days = [today - timedelta(days=offset) for offset in range(29, -1, -1)]
     data_by_day = {
         (day.year, day.month, day.day): {
