@@ -73,3 +73,5 @@ HTTPS_PORT = os.getenv("HTTPS_PORT", "")
 PANEL_DOMAIN = os.getenv("PANEL_DOMAIN", "")
 SSL_CERTFILE = os.getenv("SSL_CERTFILE", "")
 SSL_EXPIRY_NOTIFY = os.getenv("SSL_EXPIRY_NOTIFY", "1")
+# Shared with the root certificate helper (scripts/cert_helper.py).
+CERTCTL_DIR = os.getenv("VPS_PANEL_CERTCTL_DIR", "/var/lib/vps-traffic-panel-certctl")

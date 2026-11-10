@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY, PORT, HTTPS_MODE, HTTPS_PORT, PANEL_DOMAIN, SSL_CERTFILE, SSL_EXPIRY_NOTIFY
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY, PORT, HTTPS_MODE, HTTPS_PORT, PANEL_DOMAIN, SSL_CERTFILE, SSL_EXPIRY_NOTIFY, CERTCTL_DIR
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
@@ -1685,6 +1685,69 @@ async def api_ssl_status(refresh: int = 0, username: str = Depends(verify_auth))
     status = dict(await run_blocking(get_ssl_status, bool(refresh)))
     status["ssl_expiry_notify"] = SSL_EXPIRY_NOTIFY == "1"
     return status
+
+CERTCTL_PICKUP_SECONDS = 6
+CERTCTL_TIMEOUT_SECONDS = 180
+
+def _read_certctl_result():
+    try:
+        with open(os.path.join(CERTCTL_DIR, "result.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+async def certctl_request(action, **fields):
+    """Hand a request to the root certificate helper and wait for its answer.
+
+    The helper only accepts a candidate id from its own fresh scan, so nothing sent here can make
+    root read or write an arbitrary path."""
+    request_dir = os.path.join(CERTCTL_DIR, "requests")
+    if not os.path.isdir(request_dir) or not os.access(request_dir, os.W_OK):
+        raise HTTPException(status_code=503, detail="證書切換功能尚未啟用，請在 VPS 執行 vps-panel update")
+    request_id = secrets.token_hex(8)
+    fd, tmp_path = tempfile.mkstemp(dir=request_dir, prefix=".req-")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"id": request_id, "action": action, **fields}, handle)
+    os.replace(tmp_path, os.path.join(request_dir, "request.json"))
+
+    started = time.time()
+    picked_up = False
+    while time.time() - started < CERTCTL_TIMEOUT_SECONDS:
+        await asyncio.sleep(0.5)
+        result = _read_certctl_result()
+        if result and result.get("id") == request_id:
+            picked_up = True
+            if result.get("state") == "done":
+                return result
+        if not picked_up and time.time() - started > CERTCTL_PICKUP_SECONDS:
+            raise HTTPException(status_code=503, detail="證書切換服務沒有回應，請在 VPS 執行 vps-panel update 後再試")
+    raise HTTPException(status_code=504, detail="證書切換逾時，請稍後再試")
+
+@app.post("/api/ssl/scan")
+async def api_ssl_scan(username: str = Depends(verify_auth)):
+    if HTTPS_MODE not in ("nginx", "uvicorn"):
+        raise HTTPException(status_code=400, detail="面板目前沒有啟用 HTTPS")
+    result = await certctl_request("scan")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "搜尋失敗")
+    return {"candidates": result.get("candidates", []), "domain": PANEL_DOMAIN, "mode": HTTPS_MODE}
+
+@app.post("/api/ssl/apply")
+async def api_ssl_apply(payload: dict, username: str = Depends(verify_auth)):
+    global SSL_CERTFILE
+    candidate = str(payload.get("candidate", ""))
+    if not re.fullmatch(r"[0-9a-f]{16}", candidate):
+        raise HTTPException(status_code=400, detail="Invalid candidate")
+    result = await certctl_request("apply", candidate=candidate)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "切換失敗")
+    applied = result.get("applied") or {}
+    if HTTPS_MODE == "nginx" and applied.get("cert"):
+        # Nginx mode: the panel owns its .env; record the new paths so updates keep watching them.
+        update_env_values({"SSL_CERTFILE": applied["cert"], "SSL_KEYFILE": applied["key"]})
+        SSL_CERTFILE = applied["cert"]
+    SSL_STATUS_CACHE["data"] = None
+    return {"ok": True, "applied": applied, "ssl": await run_blocking(get_ssl_status, True)}
 
 @app.post("/api/ssl-settings")
 async def api_ssl_settings(payload: dict, username: str = Depends(verify_auth)):

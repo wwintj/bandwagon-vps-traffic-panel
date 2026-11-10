@@ -143,6 +143,15 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 
 **面板裡隨時查看證書狀態。** 「伺服器信息」最下方的「SSL」一行會顯示證書是否有效與剩餘天數，點開可看網域、簽發者、到期日、HTTPS 模式與端口、續期監看狀態。面板是直接連線自己的 HTTPS 端口讀取證書，看到的就是瀏覽器拿到的那一張；證書剩 14 / 7 天時會發 Telegram 提醒，最後 3 天每天提醒（自動續簽正常時不會收到）。
 
+**在面板裡切換證書。** SSL 視窗裡點「搜尋本機證書」，會用和安裝時相同的規則找出這台 VPS 上的證書（Let's Encrypt、acme.sh、x-ui / 3x-ui、Nginx 設定與常見目錄），列出網域、簽發者、到期日，並標出使用中、網域符合、自簽，以及私鑰不配對、已過期、不包含面板網域等問題。選一張可用的證書按「套用」：
+
+1. 檢查私鑰與證書配對、未過期、包含面板網域
+2. 修改面板的 Nginx 設定並執行 `nginx -t`，通過才重新載入
+3. 連線 HTTPS 端口確認實際送出的就是新證書；任何一步失敗都會**自動還原為原本的證書**
+4. 續期監看改為跟著新證書
+
+切換由一個只做這件事的 root 小服務執行（`vps-traffic-panel-certctl`）：面板只能從它重新掃描的結果中挑選編號，無法指定任意檔案路徑。從 HTTP 改為 HTTPS 或更換網域，仍請用 `vps-panel` 重新安裝。
+
 **證書續期後自動生效。** 安裝時會建立 `vps-traffic-panel-cert.path` 監看證書檔案。不管是 certbot、acme.sh、x-ui 還是手動覆蓋，只要證書一變，就會自動 reload Nginx（直連模式則重啟面板），不需要額外設定續期鉤子。用 `vps-panel status` 可以看到「Cert watch: on」。
 
 **證書上的域名必須和你訪問的域名一致**，例如證書是 `*.example.com`，就要用 `monitor.example.com` 這類子域名訪問，並在 DNS 把它解析到這台 VPS。
@@ -224,6 +233,7 @@ bash /opt/vps-traffic-panel/scripts/legacy-check.sh remove
 - **防爆破**：同一 IP 在 15 分鐘內嘗試 10 組不同的錯誤帳密後，會被鎖定 15 分鐘（重複送出同一組舊密碼不計入，避免改密碼後把自己鎖住）
 - **安全寫入**：`.env` 以原子方式寫入、權限 600，不會因斷電或磁碟滿而損壞
 - **低權限運行**：服務以 `vps-traffic-panel` 用戶運行，並啟用 `NoNewPrivileges`
+- **root 只執行 root 的程式**：證書續期與切換的輔助程式放在 root 擁有的 `/usr/local/lib/vps-traffic-panel/`，安裝與升級腳本從 root 擁有的原始碼目錄執行，`pip` 以面板用戶身分執行。面板用戶可以修改自己的安裝目錄，但無法藉此取得 root 權限
 - 反向代理的 `X-Forwarded-For` / `X-Real-IP` 只在請求來自本機時才採信
 
 ### 自行呼叫 API

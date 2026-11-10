@@ -54,7 +54,7 @@ if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
 fi
 
-for unit in "${SERVICE_NAME}-cert.path" "${SERVICE_NAME}-cert.service"; do
+for unit in "${SERVICE_NAME}-cert.path" "${SERVICE_NAME}-cert.service" "${SERVICE_NAME}-certctl.path" "${SERVICE_NAME}-certctl.service"; do
     if [[ -f "/etc/systemd/system/$unit" ]]; then
         systemctl disable --now "$unit" >/dev/null 2>&1 || true
         rm -f "/etc/systemd/system/$unit"
@@ -62,6 +62,7 @@ for unit in "${SERVICE_NAME}-cert.path" "${SERVICE_NAME}-cert.service"; do
 done
 
 systemctl daemon-reload
+rm -rf "/usr/local/lib/${SERVICE_NAME}" "/var/lib/${SERVICE_NAME}-certctl"
 
 if [[ -f "$NGINX_CONFIG_FILE" ]]; then
     echo "Removing Nginx config: $NGINX_CONFIG_FILE"

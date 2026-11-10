@@ -318,6 +318,15 @@
                 </label>
                 <p class="text-[11px] text-slate-500">Let's Encrypt 會在到期前約 30 天自動續簽；剩 14 天仍未續上，通常代表自動續簽失敗。</p>
                 <button id="ssl-refresh" class="w-full rounded border border-emerald-500/60 hover:border-emerald-300 text-emerald-200 font-bold text-sm py-2.5 transition">重新檢查</button>
+                <div class="border-t border-slate-700 pt-4 space-y-3" id="ssl-switch">
+                    <div class="flex items-center justify-between gap-3">
+                        <h3 class="text-sm font-bold text-slate-200">切換證書</h3>
+                        <button id="ssl-scan" class="shrink-0 rounded border border-sky-500/60 hover:border-sky-300 text-sky-200 text-xs font-bold px-3 py-1.5 transition">搜尋本機證書</button>
+                    </div>
+                    <p class="text-[11px] text-slate-500" id="ssl-switch-status">會搜尋 Let's Encrypt、acme.sh、x-ui / 3x-ui、Nginx 與常見目錄裡的證書。套用前會檢查私鑰、到期日與網域，套用後若面板沒有送出新證書會自動還原。</p>
+                    <div class="space-y-2" id="ssl-candidates"></div>
+                    <button id="ssl-apply" class="hidden w-full rounded bg-sky-500 hover:bg-sky-400 disabled:opacity-40 disabled:hover:bg-sky-500 text-slate-950 font-bold text-sm py-2.5 transition" disabled>套用選取的證書</button>
+                </div>
             </div>
         </div>
     </div>
@@ -563,6 +572,7 @@
             summary.textContent = text;
             summary.className = `font-mono underline decoration-dotted underline-offset-2 hover:text-slate-200 ${tone}`;
             renderSslDetails(data);
+            updateSslSwitchVisibility(data);
         }
 
         function renderSslDetails(data) {
@@ -610,6 +620,116 @@
                 document.getElementById('ssl-summary').textContent = '讀取失敗';
                 console.error("Error fetching /api/ssl-status:", e);
             }
+        }
+
+        let sslCandidates = [];
+
+        function sslBadge(text, tone) {
+            const b = document.createElement('span');
+            b.className = `rounded border px-1.5 py-0.5 text-[10px] ${tone}`;
+            b.textContent = text;
+            return b;
+        }
+
+        function renderSslCandidates(list, domain) {
+            sslCandidates = list;
+            const box = document.getElementById('ssl-candidates');
+            const applyBtn = document.getElementById('ssl-apply');
+            box.replaceChildren();
+            applyBtn.disabled = true;
+            applyBtn.classList.toggle('hidden', list.length === 0);
+            list.forEach((c) => {
+                const row = document.createElement('label');
+                row.className = `block rounded border p-2.5 text-xs ${c.usable && !c.current ? 'border-slate-600 hover:border-sky-400 cursor-pointer' : 'border-slate-700 opacity-80'}`;
+                const head = document.createElement('div');
+                head.className = 'flex flex-wrap items-center gap-1.5';
+                const radio = document.createElement('input');
+                radio.type = 'radio';
+                radio.name = 'ssl-candidate';
+                radio.value = c.id;
+                radio.className = 'accent-sky-400';
+                radio.disabled = !c.usable || c.current;
+                radio.addEventListener('change', () => { applyBtn.disabled = false; });
+                const title = document.createElement('span');
+                title.className = 'font-mono font-semibold text-slate-100 break-all';
+                title.textContent = c.subject || (c.names || [])[0] || '（無名稱）';
+                head.append(radio, title);
+                if (c.current) head.append(sslBadge('使用中', 'border-emerald-500/60 text-emerald-300'));
+                if (c.matches_domain === true) head.append(sslBadge(`符合 ${domain}`, 'border-sky-500/60 text-sky-300'));
+                if (c.self_signed) head.append(sslBadge('自簽', 'border-amber-500/60 text-amber-300'));
+                (c.problems || []).forEach((p) => head.append(sslBadge(p, 'border-red-500/60 text-red-300')));
+                const meta = document.createElement('p');
+                meta.className = 'mt-1 text-slate-400';
+                const days = c.days_left;
+                meta.textContent = `${c.issuer || '未知簽發者'} · 到期 ${c.not_after || '未知'}${days !== null && days !== undefined ? `（${days < 0 ? `已過期 ${-days} 天` : `剩 ${days} 天`}）` : ''}`;
+                const names = document.createElement('p');
+                names.className = 'text-slate-500 break-all';
+                names.textContent = (c.names || []).length > 1 ? `網域：${c.names.join('、')}` : '';
+                const path = document.createElement('p');
+                path.className = 'mt-1 font-mono text-[10px] text-slate-500 break-all';
+                path.textContent = `${c.cert}　${c.label || ''}`;
+                row.append(head, meta, names, path);
+                box.appendChild(row);
+            });
+        }
+
+        async function sslScan() {
+            const status = document.getElementById('ssl-switch-status');
+            const btn = document.getElementById('ssl-scan');
+            btn.disabled = true;
+            status.textContent = '正在搜尋本機證書，可能需要幾秒鐘...';
+            try {
+                const res = await fetch('/api/ssl/scan', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || res.statusText);
+                renderSslCandidates(data.candidates || [], data.domain || '');
+                const usable = (data.candidates || []).filter(c => c.usable && !c.current).length;
+                status.textContent = data.candidates.length
+                    ? `找到 ${data.candidates.length} 張證書，其中 ${usable} 張可以切換。`
+                    : '沒有找到其他證書。';
+            } catch (e) {
+                status.textContent = `搜尋失敗：${e.message}`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function sslApply() {
+            const selected = document.querySelector('input[name="ssl-candidate"]:checked');
+            if (!selected) return;
+            const c = sslCandidates.find(item => item.id === selected.value);
+            const status = document.getElementById('ssl-switch-status');
+            const directMode = sslStatus && sslStatus.mode === 'uvicorn';
+            const warning = directMode ? '\n\n面板會重新啟動，頁面可能短暫中斷。' : '';
+            if (!confirm(`確定改用這張證書？\n\n${c.subject}\n${c.cert}\n到期 ${c.not_after}${c.self_signed ? '\n\n注意：這是自簽證書，瀏覽器會顯示不安全。' : ''}${warning}`)) return;
+            const applyBtn = document.getElementById('ssl-apply');
+            applyBtn.disabled = true;
+            status.textContent = '正在套用並驗證...';
+            try {
+                const res = await fetch('/api/ssl/apply', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ candidate: c.id })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || res.statusText);
+                renderSslStatus(Object.assign({ ssl_expiry_notify: document.getElementById('ssl-expiry-notify').checked }, data.ssl));
+                status.textContent = `已切換為 ${c.subject}，並確認面板正在使用新證書。`;
+                renderSslCandidates([], '');
+            } catch (e) {
+                if (directMode && e instanceof TypeError) {
+                    // Direct HTTPS mode restarts the panel itself; check again once it is back.
+                    status.textContent = '面板正在重新啟動，稍後自動重新檢查...';
+                    setTimeout(() => fetchSslStatus(true).then(() => { status.textContent = '已重新檢查，請確認上方證書資訊。'; }), 8000);
+                } else {
+                    status.textContent = `切換失敗：${e.message}`;
+                    applyBtn.disabled = false;
+                }
+            }
+        }
+
+        function updateSslSwitchVisibility(data) {
+            document.getElementById('ssl-switch').classList.toggle('hidden', !data.enabled);
         }
 
         async function saveSslNotify() {
@@ -1346,6 +1466,8 @@
             note.textContent = '已重新檢查。面板直接連線自己的 HTTPS 端口，讀出瀏覽器實際看到的證書';
         });
         document.getElementById('ssl-expiry-notify').addEventListener('change', saveSslNotify);
+        document.getElementById('ssl-scan').addEventListener('click', sslScan);
+        document.getElementById('ssl-apply').addEventListener('click', sslApply);
         document.getElementById('auth-settings-save').addEventListener('click', () => saveSettings('auth'));
         document.getElementById('panel-settings-save').addEventListener('click', () => saveSettings('panel'));
         document.getElementById('telegram-save').addEventListener('click', saveTelegramSettings);

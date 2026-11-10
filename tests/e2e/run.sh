@@ -69,7 +69,7 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.5.0"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.6.0"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"
@@ -118,6 +118,63 @@ vps-panel status | tee /tmp/status.txt
 grep -q "https://$DOMAIN:8443" /tmp/status.txt || die "status shows wrong URL"
 check "status shows URL"
 grep -q "PathChanged=$CERT_DIR$" /etc/systemd/system/vps-traffic-panel-cert.path && check "symlinked cert dir is watched" || die "symlinked cert dir not watched"
+
+step "Root-run code lives outside the panel user's reach"
+LIB=/usr/local/lib/vps-traffic-panel
+[ "$(stat -c %U "$LIB/cert_helper.py")" = root ] || die "cert helper not owned by root"
+runuser -u vps-traffic-panel -- test -w "$LIB/cert_helper.py" && die "panel user can modify the root helper"
+runuser -u vps-traffic-panel -- test -w "$LIB" && die "panel user can write the helper directory"
+grep -q "ExecStart=/bin/bash $LIB/cert-watch.sh reload" /etc/systemd/system/vps-traffic-panel-cert.service || die "renewal unit still runs code from the install dir"
+systemctl is-active --quiet vps-traffic-panel-certctl.path || die "certificate switcher not active"
+[ "$(stat -c %U /var/lib/vps-traffic-panel-certctl/requests)" = vps-traffic-panel ] || die "request dir has wrong owner"
+check "helper and units are root-owned and outside the install dir"
+
+step "Certificate switcher: scan"
+api() { curl -s -u "admin:$PASS" -H 'X-Panel-Request: 1' -H 'Content-Type: application/json' "http://127.0.0.1:8088$1" "${@:2}"; }
+NEW_DIR=/root/cert/panel.test
+mkdir -p "$NEW_DIR"
+make_cert "$NEW_DIR/private.key" "$NEW_DIR/fullchain.pem"
+mkdir -p /root/badcert
+make_cert /tmp/bad1.key /root/badcert/server.crt
+make_cert /root/badcert/server.key /tmp/bad2.crt
+scan_json=$(api /api/ssl/scan -X POST)
+pick() {  # pick <path-fragment> <field>
+    echo "$scan_json" | python3 -c '
+import json, sys
+c = [x for x in json.load(sys.stdin)["candidates"] if sys.argv[1] in x["cert"]][0]
+print(json.dumps(c[sys.argv[2]]) if not isinstance(c[sys.argv[2]], str) else c[sys.argv[2]])
+' "$1" "$2"
+}
+[ "$(pick /etc/letsencrypt/live/panel.test current)" = true ] || die "current certificate not marked: $scan_json"
+[ "$(pick /root/cert/panel.test usable)" = true ] || die "new certificate should be usable: $scan_json"
+[ "$(pick /root/badcert usable)" = false ] || die "mismatched pair should not be usable"
+pick /root/badcert problems | grep -q "不配對" || die "mismatch not explained"
+check "scan lists current, usable and broken certificates"
+
+step "Certificate switcher: refuse a broken pair, keep serving the old cert"
+before=$(served_serial 8443)
+bad_id=$(pick /root/badcert id)
+code=$(api /api/ssl/apply -X POST -d "{\"candidate\": \"$bad_id\"}" -o /tmp/apply-bad.json -w '%{http_code}')
+[ "$code" = 400 ] && grep -q "不配對" /tmp/apply-bad.json || die "broken pair was not refused: $code $(cat /tmp/apply-bad.json)"
+[ "$(served_serial 8443)" = "$before" ] || die "served certificate changed after a refused switch"
+check "broken pair refused"
+
+step "Certificate switcher: switch to the new certificate"
+new_id=$(pick /root/cert/panel.test id)
+expected=$(openssl x509 -in "$NEW_DIR/fullchain.pem" -noout -serial)
+code=$(api /api/ssl/apply -X POST -d "{\"candidate\": \"$new_id\"}" -o /tmp/apply.json -w '%{http_code}')
+[ "$code" = 200 ] || die "switch failed: $code $(cat /tmp/apply.json)"
+[ "$(served_serial 8443)" = "$expected" ] || die "Nginx does not serve the new certificate"
+grep -q "^SSL_CERTFILE=$NEW_DIR/fullchain.pem$" /opt/vps-traffic-panel/.env || die ".env not updated"
+grep -q "ssl_certificate $NEW_DIR/fullchain.pem;" /etc/nginx/conf.d/vps-traffic-panel.conf || die "nginx config not updated"
+check "switched; Nginx serves the new certificate"
+
+before=$(served_serial 8443)
+make_cert /tmp/renew.key /tmp/renew.pem
+cat /tmp/renew.key > "$NEW_DIR/private.key"
+cat /tmp/renew.pem > "$NEW_DIR/fullchain.pem"
+wait_for_serial_change 8443 "$before" || die "renewal of the switched-to certificate not picked up"
+check "renewal watcher follows the new certificate"
 
 step "Update (with the old standalone cf-ddns script present)"
 printf '[Unit]\nDescription=fake legacy cf-ddns\n[Timer]\nOnUnitActiveSec=5min\n[Install]\nWantedBy=timers.target\n' > /etc/systemd/system/cf-ddns.timer

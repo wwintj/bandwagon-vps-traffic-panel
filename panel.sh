@@ -151,8 +151,9 @@ cmd_uninstall() {
                 keep_data=1
             fi
         fi
-        local script="$INSTALL_DIR/scripts/uninstall.sh"
-        [ -f "$script" ] || script="$SRC_DIR/scripts/uninstall.sh"
+        # Prefer the root-owned source copy; the install directory belongs to the panel user.
+        local script="$SRC_DIR/scripts/uninstall.sh"
+        [ -f "$script" ] || script="$INSTALL_DIR/scripts/uninstall.sh"
         if [ "$keep_data" -eq 1 ]; then
             bash "$script" --keep-data
         else

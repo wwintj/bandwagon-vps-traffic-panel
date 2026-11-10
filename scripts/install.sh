@@ -740,7 +740,7 @@ else
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         useradd --system --no-create-home --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
     fi
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+    chown -hR "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 fi
 
 info "Configuring systemd service..."
@@ -776,7 +776,8 @@ systemctl restart "$SERVICE_NAME"
 configure_nginx_proxy
 
 # Reload Nginx / restart the panel automatically whenever the certificate is renewed.
-bash "$INSTALL_DIR/scripts/cert-watch.sh" sync
+# Run from the root-owned source checkout: the install directory belongs to the panel user.
+bash "$PROJECT_ROOT/scripts/cert-watch.sh" sync
 
 ACCESS_URL="http://$PUBLIC_IP:$PORT"
 if [ "$HTTPS_MODE" = "nginx" ]; then
@@ -788,7 +789,7 @@ else
     open_firewall_port "$PORT"
 fi
 
-bash "$INSTALL_DIR/scripts/legacy-check.sh"
+bash "$PROJECT_ROOT/scripts/legacy-check.sh"
 
 ok "===================================="
 ok "Installation Successful!"

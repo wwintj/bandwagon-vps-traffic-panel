@@ -79,16 +79,25 @@ main() {
     rsync -a --delete \
         --exclude={'.git','.github','tests','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} \
         "$SOURCE_DIR/" "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR"/scripts/*.sh
 
     cd "$INSTALL_DIR"
     if [ ! -d venv ]; then
         python3 -m venv venv
     fi
 
+    # The install directory (including venv) belongs to the panel user. Fix ownership first, then
+    # run pip as that user: root must never execute code the panel user can modify.
+    if [ "$RUN_USER" != "root" ] && id "$RUN_USER" >/dev/null 2>&1; then
+        chown -hR "$RUN_USER:$RUN_USER" "$INSTALL_DIR"
+        chown root:root "$INSTALL_DIR/backups" && chmod 700 "$INSTALL_DIR/backups"
+    fi
+
     echo -e "${YELLOW}Updating Python dependencies...${RESET}"
-    . venv/bin/activate
-    pip install -q -r requirements.txt
+    if [ "$RUN_USER" != "root" ] && id "$RUN_USER" >/dev/null 2>&1; then
+        runuser -u "$RUN_USER" -- "$INSTALL_DIR/venv/bin/pip" install -q -r requirements.txt
+    else
+        "$INSTALL_DIR/venv/bin/pip" install -q -r requirements.txt
+    fi
 
     # Older installs bound to 0.0.0.0 even behind the Nginx HTTPS proxy, exposing plain HTTP publicly.
     if [ -f .env ] && grep -q '^HTTPS_MODE=nginx' .env && grep -q '^HOST=0\.0\.0\.0' .env; then
@@ -96,23 +105,18 @@ main() {
         sed -i 's/^HOST=0\.0\.0\.0$/HOST=127.0.0.1/' .env
     fi
 
-    # rsync resets the directory owner; the service user must be able to write .env and data.db.
-    if [ "$RUN_USER" != "root" ] && id "$RUN_USER" >/dev/null 2>&1; then
-        chown -R "$RUN_USER:$RUN_USER" "$INSTALL_DIR"
-        chown root:root "$INSTALL_DIR/backups" && chmod 700 "$INSTALL_DIR/backups"
-    fi
-
     echo -e "${YELLOW}Restarting service...${RESET}"
     systemctl daemon-reload
     systemctl restart "$SERVICE_NAME"
 
-    # Keep HTTPS working across certificate renewals (also enables it for older installs).
-    bash "$INSTALL_DIR/scripts/cert-watch.sh" sync
+    # Certificate renewal watcher and switcher. Run from the root-owned source checkout, never
+    # from the install directory, which the panel user can modify.
+    bash "$SOURCE_DIR/scripts/cert-watch.sh" sync
 
     local new_version
     new_version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$INSTALL_DIR/app/__init__.py" 2>/dev/null || true)
     echo -e "${GREEN}Update completed: v${old_version:-unknown} -> v${new_version:-unknown}${RESET}"
-    bash "$INSTALL_DIR/scripts/legacy-check.sh"
+    bash "$SOURCE_DIR/scripts/legacy-check.sh"
     echo -e "Install directory : $INSTALL_DIR"
     echo -e "Backups           : $INSTALL_DIR/backups (newest $KEEP_BACKUPS kept)"
     echo -e "Service status    : systemctl status $SERVICE_NAME"
