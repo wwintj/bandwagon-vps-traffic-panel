@@ -66,3 +66,4 @@ TRAFFIC_ALERT_ENABLED = os.getenv("TRAFFIC_ALERT_ENABLED", "1")
 TRAFFIC_ALERT_THRESHOLDS = os.getenv("TRAFFIC_ALERT_THRESHOLDS", "80,90,100")
 # VPS billing expiry date (YYYY-MM-DD). The KiwiVM API does not expose it, so it is entered by hand.
 VPS_EXPIRY_DATE = os.getenv("VPS_EXPIRY_DATE", "")
+VPS_EXPIRY_NOTIFY = os.getenv("VPS_EXPIRY_NOTIFY", "1")

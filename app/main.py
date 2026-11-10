@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
@@ -636,6 +636,58 @@ def check_traffic_alert(quota):
     set_meta_value("traffic_alert_sent", ",".join(str(t) for t in sorted(sent | set(crossed))))
     return top
 
+def expiry_reminder_stage(days_left, today):
+    """30 days out, 7 days out, then every day from 3 days out (including the day and after expiry)."""
+    if days_left > 30:
+        return None
+    if days_left > 7:
+        return "30"
+    if days_left > 3:
+        return "7"
+    return f"day-{today.isoformat()}"
+
+def check_expiry_reminder(now=None):
+    """Telegram reminder before the VPS expires. Sent at the daily report time, not at midnight.
+    Returns the stage that was sent, or None."""
+    if VPS_EXPIRY_NOTIFY != "1":
+        return None
+    now = now or configured_now()
+    expiry = get_vps_expiry(now.date())
+    if not expiry:
+        return None
+    if (now.hour, now.minute) < (TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE):
+        return None
+    days = expiry["days_left"]
+    stage = expiry_reminder_stage(days, now.date())
+    if not stage:
+        return None
+
+    # A new expiry date (e.g. after renewing) starts the reminder schedule over.
+    if get_meta_value("expiry_reminder_date", "") != expiry["date"]:
+        set_meta_value("expiry_reminder_date", expiry["date"])
+        set_meta_value("expiry_reminder_sent", "")
+    sent = [item for item in get_meta_value("expiry_reminder_sent", "").split(",") if item]
+    if stage in sent:
+        return None
+
+    if days < 0:
+        title = f"VPS 已過期 {-days} 天"
+    elif days == 0:
+        title = "VPS 今天到期"
+    else:
+        title = f"VPS 即將到期：剩 {days} 天"
+    lines = [
+        f"到期日：<b>{escape_html(expiry['date'])}</b>",
+        "到期後 VPS 會停機，面板也將無法訪問，請盡快到 KiwiVM 續費。",
+        "續費後請到面板「設定流量」更新到期日。",
+    ]
+    if days <= 3:
+        lines.append("到期前 3 天起每天提醒一次。")
+    if not send_telegram_notice(migration_telegram_message(title, lines)):
+        return None
+    set_meta_value("expiry_reminder_sent", ",".join((sent + [stage])[-10:]))
+    return stage
+
 def run_traffic_alert_check(pending):
     summary = get_traffic_summary(pending)
     return check_traffic_alert(summary.get("traffic_quota"))
@@ -643,13 +695,15 @@ def run_traffic_alert_check(pending):
 async def traffic_alert_watcher():
     await asyncio.sleep(60)
     while True:
-        if TRAFFIC_ALERT_ENABLED == "1" and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             try:
-                await run_blocking(run_traffic_alert_check, collector_instance.snapshot_pending())
+                if TRAFFIC_ALERT_ENABLED == "1":
+                    await run_blocking(run_traffic_alert_check, collector_instance.snapshot_pending())
+                await run_blocking(check_expiry_reminder)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Traffic alert check failed: %s", exc)
+                logger.warning("Traffic / expiry alert check failed: %s", exc)
         await asyncio.sleep(600)
 
 def bandwagon_request(action, params=None):
@@ -1116,7 +1170,7 @@ def build_telegram_message(pending=None):
     expiry = get_vps_expiry(configured_now().date())
     if expiry:
         days = expiry["days_left"]
-        state = f"已過期 {-days} 天" if days < 0 else f"<b>{days} 天</b>" if days <= 7 else f"{days} 天"
+        state = f"已過期 {-days} 天" if days < 0 else f"<b>{days} 天</b>" if days <= 14 else f"{days} 天"
         lines.append(f"VPS 到期    {state}（{expiry['date']}）")
     lines += [
         "",
@@ -1512,6 +1566,7 @@ async def api_get_traffic_quota(username: str = Depends(verify_auth)):
         "bandwagon_available": bool(bw and not bw.get("error") and bw.get("limit")),
         "bandwagon_error": bw.get("error") if bw and bw.get("error") else "",
         "vps_expiry_date": VPS_EXPIRY_DATE,
+        "vps_expiry_notify": VPS_EXPIRY_NOTIFY == "1",
         "traffic_alert_enabled": TRAFFIC_ALERT_ENABLED == "1",
         "traffic_alert_thresholds": ",".join(str(t) for t in parse_alert_thresholds(TRAFFIC_ALERT_THRESHOLDS)),
         "telegram_ready": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -1519,7 +1574,7 @@ async def api_get_traffic_quota(username: str = Depends(verify_auth)):
 
 @app.post("/api/traffic-quota")
 async def api_update_traffic_quota(payload: dict, username: str = Depends(verify_auth)):
-    global TRAFFIC_QUOTA_BYTES, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE
+    global TRAFFIC_QUOTA_BYTES, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY
 
     try:
         quota_bytes = int(payload.get("traffic_quota_bytes", 0))
@@ -1546,6 +1601,9 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
             raise HTTPException(status_code=400, detail="Invalid expiry date, use YYYY-MM-DD")
         VPS_EXPIRY_DATE = expiry.isoformat() if expiry else ""
         updates["VPS_EXPIRY_DATE"] = VPS_EXPIRY_DATE
+    if "vps_expiry_notify" in payload:
+        VPS_EXPIRY_NOTIFY = "1" if payload.get("vps_expiry_notify") else "0"
+        updates["VPS_EXPIRY_NOTIFY"] = VPS_EXPIRY_NOTIFY
 
     TRAFFIC_QUOTA_BYTES = quota_bytes
     update_env_values(updates)

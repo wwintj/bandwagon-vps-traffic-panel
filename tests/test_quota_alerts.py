@@ -195,3 +195,74 @@ def test_expiry_date_settings(m, client, auth, post_headers, monkeypatch):
     assert client.post("/api/traffic-quota", headers=post_headers, json=dict(base, vps_expiry_date="25/01/2027")).status_code == 400
     r = client.post("/api/traffic-quota", headers=post_headers, json=dict(base, vps_expiry_date=""))
     assert r.status_code == 200 and r.json()["vps_expiry"] is None
+
+
+# ---- VPS expiry reminders ---------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+
+@pytest.fixture
+def expiry(m, monkeypatch):
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", "2026-12-31")
+    monkeypatch.setattr(m, "VPS_EXPIRY_NOTIFY", "1")
+    monkeypatch.setattr(m, "TELEGRAM_PUSH_HOUR", 20)
+    monkeypatch.setattr(m, "TELEGRAM_PUSH_MINUTE", 0)
+    monkeypatch.setattr(m, "TELEGRAM_BOT_TOKEN", "bot")
+    monkeypatch.setattr(m, "TELEGRAM_CHAT_ID", "chat")
+    m.set_meta_value("expiry_reminder_date", "")
+    m.set_meta_value("expiry_reminder_sent", "")
+    sent = []
+    monkeypatch.setattr(m, "send_telegram_message", lambda text: sent.append(text))
+    m._sent = sent
+    return m
+
+
+def test_expiry_reminder_schedule(expiry):
+    reminded_days = []
+    day = datetime(2026, 11, 25)
+    while day <= datetime(2027, 1, 2):
+        for hour in (8, 20, 23):  # 8:00 is before the push time and must not send
+            before = len(expiry._sent)
+            expiry.check_expiry_reminder(day.replace(hour=hour, minute=30))
+            if len(expiry._sent) > before:
+                assert hour != 8
+                reminded_days.append((datetime(2026, 12, 31) - day).days)
+        day += timedelta(days=1)
+    # 30 days, 7 days, then every day from 3 days out, also after expiry while the panel is still up
+    assert reminded_days == [30, 7, 3, 2, 1, 0, -1, -2]
+    assert "剩 30 天" in expiry._sent[0]
+    assert "今天到期" in expiry._sent[5]
+    assert "已過期 1 天" in expiry._sent[6]
+
+
+def test_expiry_reminder_first_set_inside_window(expiry, monkeypatch):
+    monkeypatch.setattr(expiry, "VPS_EXPIRY_DATE", "2026-12-21")
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 1, 21)) == "30"   # 20 days left
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 2, 21)) is None
+
+
+def test_renewal_restarts_schedule(expiry, monkeypatch):
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 29, 21)) is not None
+    monkeypatch.setattr(expiry, "VPS_EXPIRY_DATE", "2027-12-31")   # renewed
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 30, 21)) is None
+    assert expiry.check_expiry_reminder(datetime(2027, 12, 1, 21)) == "30"
+
+
+def test_expiry_reminder_off_or_unset(expiry, monkeypatch):
+    monkeypatch.setattr(expiry, "VPS_EXPIRY_NOTIFY", "0")
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 30, 21)) is None
+    monkeypatch.setattr(expiry, "VPS_EXPIRY_NOTIFY", "1")
+    monkeypatch.setattr(expiry, "VPS_EXPIRY_DATE", "")
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 30, 21)) is None
+    assert expiry._sent == []
+
+
+def test_expiry_reminder_retries_after_failed_send(expiry, monkeypatch):
+    def broken(text):
+        raise OSError("down")
+
+    monkeypatch.setattr(expiry, "send_telegram_message", broken)
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 30, 21)) is None
+    monkeypatch.setattr(expiry, "send_telegram_message", lambda text: expiry._sent.append(text))
+    assert expiry.check_expiry_reminder(datetime(2026, 12, 30, 21, 10)) is not None

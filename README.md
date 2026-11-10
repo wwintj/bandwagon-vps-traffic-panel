@@ -15,7 +15,8 @@
 - 即時上下行速度
 - 今日、本期（自訂每月重置日）、累計流量
 - 最近 24 小時 / 30 天 / 12 個月趨勢圖
-- 月流量配額進度條、「距離重置還剩幾天」與「距離 VPS 到期還剩幾天」（到期日手動填寫，7 天內變黃、3 天內變紅）：配額可手動設定，或直接讀取 Bandwagon 官方用量
+- 月流量配額進度條與「距離重置還剩幾天」：配額可手動設定，或直接讀取 Bandwagon 官方用量
+- VPS 到期日（手動填寫，搬瓦工 API 不提供）：顯示在「伺服器信息」，14 天內變黃、7 天內變紅；到期前 30 / 7 / 3 天發 Telegram 提醒，最後 3 天每天提醒
 - 流量預警：用量達 80% / 90% / 100%（可自訂）時發 Telegram 提醒，每個計費週期每檔只提醒一次
 - 一鍵清零統計
 
@@ -157,7 +158,7 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 | `MONTH_RESET_DAY` | 每月流量重置日（1–31，月份天數不足時取月底） | `1` |
 | `TRAFFIC_QUOTA_BYTES` | 手動月流量配額（位元組），`0` 為不設定 | `0` |
 | `TRAFFIC_ALERT_ENABLED` / `TRAFFIC_ALERT_THRESHOLDS` | 流量預警開關與門檻（%，逗號分隔） | `1` / `80,90,100` |
-| `VPS_EXPIRY_DATE` | VPS 到期日（`YYYY-MM-DD`），搬瓦工 API 不提供，需手動填寫 | 空 |
+| `VPS_EXPIRY_DATE` / `VPS_EXPIRY_NOTIFY` | VPS 到期日（`YYYY-MM-DD`，需手動填寫）與是否發到期提醒 | 空 / `1` |
 | `TELEGRAM_ENABLED` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 推送 | 關閉 |
 | `TELEGRAM_PUSH_HOUR` / `TELEGRAM_PUSH_MINUTE` | 每日推送時間 | `20:00` |
 | `TELEGRAM_TIMEZONE_OFFSET` / `TELEGRAM_TIMEZONE_LABEL` | **面板時區**（見下方） | `8` / `中國時間` |
