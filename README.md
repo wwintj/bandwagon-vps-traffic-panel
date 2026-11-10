@@ -1,7 +1,7 @@
 # VPS 監控流量面板
 
-[![test](https://github.com/wwintj/vps-traffic-panel/actions/workflows/test.yml/badge.svg)](https://github.com/wwintj/vps-traffic-panel/actions/workflows/test.yml)
-[![release](https://img.shields.io/github/v/release/wwintj/vps-traffic-panel)](https://github.com/wwintj/vps-traffic-panel/releases)
+[![test](https://github.com/wwintj/bandwagon-vps-traffic-panel/actions/workflows/test.yml/badge.svg)](https://github.com/wwintj/bandwagon-vps-traffic-panel/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/wwintj/bandwagon-vps-traffic-panel)](https://github.com/wwintj/bandwagon-vps-traffic-panel/releases)
 
 一個輕量、適合長期掛在 VPS 上的流量監控面板。直接讀取 Linux 的 `/proc/net/dev`，資源占用很低，1C1G 的小機器也能跑。
 
@@ -45,7 +45,7 @@
 用 root 執行這一行，會出現選單：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/bandwagon-vps-traffic-panel/main/panel.sh)
 ```
 
 ```
@@ -87,7 +87,7 @@ vps-panel uninstall     # 一鍵卸載（會問要不要先備份資料）
 VPS_PANEL_PASSWORD='your-password' \
 VPS_PANEL_CERT=/root/cert/fullchain.pem VPS_PANEL_KEY=/root/cert/private.key \
 VPS_PANEL_DOMAIN=monitor.example.com \
-bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh) install -y
+bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/bandwagon-vps-traffic-panel/main/panel.sh) install -y
 ```
 
 | 變數 | 說明 |
@@ -104,7 +104,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/mai
 
 ```bash
 apt-get update && apt-get install -y git curl
-git clone https://github.com/wwintj/vps-traffic-panel.git /opt/vps-traffic-panel-src
+git clone https://github.com/wwintj/bandwagon-vps-traffic-panel.git /opt/vps-traffic-panel-src
 sudo /opt/vps-traffic-panel-src/scripts/install.sh   # 安裝
 sudo /opt/vps-traffic-panel-src/scripts/update.sh    # 升級（會自動拉取最新版）
 sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份資料
@@ -333,4 +333,4 @@ tests/           pytest 與端到端測試
 
 ## 更新日誌
 
-見 [CHANGELOG.md](CHANGELOG.md) 與 [Releases](https://github.com/wwintj/vps-traffic-panel/releases)。
+見 [CHANGELOG.md](CHANGELOG.md) 與 [Releases](https://github.com/wwintj/bandwagon-vps-traffic-panel/releases)。

@@ -22,7 +22,7 @@
 ## v1.1.0 — 2026-11-10
 
 ### 新增
-- **一鍵管理**：`bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh)` 打開選單，可以安裝、升級、卸載、查看狀態與日誌；裝好後輸入 `vps-panel` 即可使用。
+- **一鍵管理**：`bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/bandwagon-vps-traffic-panel/main/panel.sh)` 打開選單，可以安裝、升級、卸載、查看狀態與日誌；裝好後輸入 `vps-panel` 即可使用。
 - **證書續期自動生效**：用 systemd 監看證書檔案，certbot / acme.sh / x-ui / 手動覆蓋都能偵測到，自動 reload Nginx 或重啟面板。舊安裝執行升級後也會自動啟用。
 - **無人值守安裝**：用 `VPS_PANEL_*` 環境變數預先回答所有問題。
 - 只找到一張證書時，會先問要不要使用。

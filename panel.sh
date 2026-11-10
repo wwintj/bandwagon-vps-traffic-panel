@@ -1,14 +1,14 @@
 #!/bin/bash
 # VPS Traffic Panel — one-command manager.
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/vps-traffic-panel/main/panel.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/wwintj/bandwagon-vps-traffic-panel/main/panel.sh)
 #
 # After installing, run `vps-panel` for the same menu, or call a command directly:
 #   vps-panel install | update | uninstall | status | logs | restart
 # Options for uninstall: --keep-data, --purge (also delete the downloaded source), -y
 set -e
 
-REPO_URL="${VPS_PANEL_REPO:-https://github.com/wwintj/vps-traffic-panel.git}"
+REPO_URL="${VPS_PANEL_REPO:-https://github.com/wwintj/bandwagon-vps-traffic-panel.git}"
 SRC_DIR="${VPS_PANEL_SRC:-/opt/vps-traffic-panel-src}"
 INSTALL_DIR="/opt/vps-traffic-panel"
 SERVICE_NAME="vps-traffic-panel"
