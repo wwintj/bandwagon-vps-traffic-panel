@@ -118,7 +118,10 @@
         <div class="card">
             <div class="flex justify-between items-center mb-3">
                 <div><p class="text-xs text-slate-400 uppercase">CPU 使用率</p><p class="text-lg font-bold" id="sys-cpu">0%</p></div>
-                <div class="text-right text-xs text-slate-500" id="sys-cpu-cores">0 核心</div>
+                <div class="text-right text-xs text-slate-500">
+                    <p id="sys-cpu-cores">0 核心</p>
+                    <p class="mt-0.5 font-mono whitespace-nowrap" id="sys-load" title="系統負載：1 / 5 / 15 分鐘平均。長時間高於核心數代表 CPU 忙不過來。"></p>
+                </div>
             </div>
             <div class="progress-track"><div class="progress-fill bg-cyan-400" id="sys-cpu-bar"></div></div>
         </div>
@@ -474,6 +477,18 @@
             percentEl.textContent = `${percent.toFixed(1)}%`;
             detail.textContent = `${formatBytes(quota.used)} / ${formatBytes(quota.limit)}`;
             detail.title = quota.source_label ? `數據來源：${quota.source_label}` : '';
+        }
+
+        function renderLoadAverage(load, cores) {
+            const el = document.getElementById('sys-load');
+            if (!Array.isArray(load) || load.length !== 3) {
+                el.textContent = '';
+                return;
+            }
+            el.textContent = `負載 ${load.map(v => Number(v).toFixed(2)).join(' / ')}`;
+            // Judge by the 5-minute average relative to core count, so a short spike doesn't flash red.
+            const ratio = load[1] / Math.max(1, Number(cores) || 1);
+            el.className = `mt-0.5 font-mono whitespace-nowrap ${ratio >= 2 ? 'text-red-400' : ratio >= 1 ? 'text-amber-400' : 'text-slate-500'}`;
         }
 
         function formatCoordinates(lat, lon) {
@@ -974,6 +989,7 @@
                 document.getElementById('sys-kernel-mobile').innerText = data.kernel_release;
                 document.getElementById('sys-cpu').innerText = `${data.cpu_percent}%`;
                 document.getElementById('sys-cpu-cores').innerText = `${data.cpu_count} 核心`;
+                renderLoadAverage(data.load_avg, data.cpu_count);
                 document.getElementById('sys-mem').innerText = `${data.memory_percent}%`;
                 document.getElementById('sys-mem-detail').innerText = `${(data.memory_used/1073741824).toFixed(1)} / ${(data.memory_total/1073741824).toFixed(1)} GB`;
                 document.getElementById('sys-disk').innerText = `${data.disk_percent}%`;

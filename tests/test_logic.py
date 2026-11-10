@@ -120,3 +120,17 @@ def test_timezone_offset_moves_today(monkeypatch):
         assert 7.99 * 3600 < diff.total_seconds() < 8.01 * 3600
     finally:
         timeutil.set_offset(8)
+
+
+def test_load_average_reported(m, client, auth):
+    data = client.get("/api/system", headers=auth).json()
+    load = data["load_avg"]
+    assert load is None or (len(load) == 3 and all(isinstance(v, (int, float)) and v >= 0 for v in load))
+
+
+def test_load_average_missing_on_platforms_without_it(m, monkeypatch):
+    def unsupported():
+        raise OSError("not available")
+
+    monkeypatch.setattr(m.os, "getloadavg", unsupported)
+    assert m.get_load_average() is None

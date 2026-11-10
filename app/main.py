@@ -1536,6 +1536,12 @@ async def api_realtime(username: str = Depends(verify_auth)):
 async def api_ping(username: str = Depends(verify_auth)):
     return {"ok": True, "server_time": timeutil.now().isoformat(), "version": __version__}
 
+def get_load_average():
+    try:
+        return [round(value, 2) for value in os.getloadavg()]
+    except (AttributeError, OSError):
+        return None
+
 def build_system_info(client_ip):
     """Blocking: public IP lookups, ip-api calls and a 0.1s CPU sample. Run via run_blocking."""
     ip, ip_info = get_cached_public_ip_info()
@@ -1571,6 +1577,7 @@ def build_system_info(client_ip):
         "uptime": uptime,
         "cpu_count": psutil.cpu_count(logical=True),
         "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "load_avg": get_load_average(),
         "memory_total": mem.total,
         "memory_used": mem.used,
         "memory_percent": mem.percent,
