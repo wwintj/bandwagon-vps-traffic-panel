@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from calendar import monthrange
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
@@ -31,9 +31,14 @@ from app.collector import collector_instance
 from app import timeutil
 from app import sslinfo
 from app import passwords
+from app import sessions
 from app import __version__
 
-security = HTTPBasic()
+# Basic auth stays available for scripts (curl -u); browsers use the login page and a session cookie.
+security = HTTPBasic(auto_error=False)
+SESSION_COOKIE = "vps_panel_session"
+SESSION_TTL = 12 * 3600
+SESSION_TTL_REMEMBER = 30 * 24 * 3600
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -114,7 +119,21 @@ def migrate_plaintext_password():
     logger.info("Stored the panel password as a salted hash and removed the plaintext from .env")
     return True
 
+def has_valid_session(request: Request):
+    return sessions.is_valid(request.cookies.get(SESSION_COOKIE, ""))
+
+def request_is_https(request: Request):
+    if request.url.scheme == "https":
+        return True
+    peer = request.client.host if request.client else ""
+    return peer in TRUSTED_PROXIES and request.headers.get("x-forwarded-proto", "").lower() == "https"
+
 def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+    if has_valid_session(request):
+        return AUTH_USERNAME
+    if credentials is None:
+        # No WWW-Authenticate header: browsers must not pop up their own login dialog.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登入")
     client_ip = get_client_ip(request)
     if is_auth_locked(client_ip):
         raise HTTPException(
@@ -129,11 +148,7 @@ def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(se
         )
     if not check_credentials(credentials.username, credentials.password):
         record_auth_failure(client_ip, credentials.username, credentials.password)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
     AUTH_FAILURES.pop(client_ip, None)
     return credentials.username
 
@@ -1400,8 +1415,50 @@ async def telegram_daily_notifier():
             logger.warning("Telegram daily report failed, will retry: %s", exc)
             await asyncio.sleep(300)
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if has_valid_session(request):
+        return RedirectResponse("/", status_code=302)
+    return templates.TemplateResponse(request, "login.html", {"panel_title": PANEL_TITLE, "version": __version__})
+
+@app.post("/api/login")
+async def api_login(payload: dict, request: Request):
+    client_ip = get_client_ip(request)
+    if is_auth_locked(client_ip):
+        raise HTTPException(status_code=429, detail="嘗試次數過多，請 15 分鐘後再試")
+    if not credentials_configured():
+        raise HTTPException(status_code=503, detail="面板尚未設定帳號密碼，請檢查 .env")
+    username = str(payload.get("username", ""))
+    password = str(payload.get("password", ""))
+    if not await run_blocking(check_credentials, username, password):
+        record_auth_failure(client_ip, username, password)
+        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
+    AUTH_FAILURES.pop(client_ip, None)
+    remember = bool(payload.get("remember"))
+    ttl = SESSION_TTL_REMEMBER if remember else SESSION_TTL
+    token = await run_blocking(sessions.create, ttl)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        SESSION_COOKIE, token, max_age=ttl if remember else None, path="/",
+        httponly=True, samesite="strict", secure=request_is_https(request),
+    )
+    return response
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    sessions.delete(request.cookies.get(SESSION_COOKIE, ""))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
 @app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request, username: str = Depends(verify_auth)):
+async def read_root(request: Request):
+    try:
+        verify_auth(request, await security(request))
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return RedirectResponse("/login", status_code=302)
+        raise
     return templates.TemplateResponse(request, "index.html", {
         "interface": collector_instance.interface,
         "panel_title": PANEL_TITLE,
@@ -1410,12 +1467,11 @@ async def read_root(request: Request, username: str = Depends(verify_auth)):
     })
 
 @app.get("/logout")
-async def logout():
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Logged out",
-        headers={"WWW-Authenticate": "Basic realm=\"Logged out\""},
-    )
+async def logout(request: Request):
+    sessions.delete(request.cookies.get(SESSION_COOKIE, ""))
+    response = RedirectResponse("/login", status_code=302)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 @app.get("/api/settings")
 async def api_get_settings(username: str = Depends(verify_auth)):
@@ -1426,7 +1482,7 @@ async def api_get_settings(username: str = Depends(verify_auth)):
     }
 
 @app.post("/api/settings")
-async def api_update_settings(payload: dict, username: str = Depends(verify_auth)):
+async def api_update_settings(payload: dict, request: Request, username: str = Depends(verify_auth)):
     global AUTH_USERNAME, AUTH_PASSWORD, AUTH_PASSWORD_HASH, PANEL_TITLE, PANEL_SUBTITLE
 
     new_username = str(payload.get("auth_username", "")).strip()
@@ -1456,6 +1512,8 @@ async def api_update_settings(payload: dict, username: str = Depends(verify_auth
     if new_password:
         AUTH_PASSWORD_HASH, AUTH_PASSWORD = new_hash, ""
         VERIFIED_CREDENTIALS.clear()
+        # New password: sign out every other browser, keep this one logged in.
+        sessions.delete_all_except(request.cookies.get(SESSION_COOKIE) or None)
     PANEL_TITLE = new_title
     PANEL_SUBTITLE = new_subtitle
 
@@ -1846,6 +1904,23 @@ async def api_ssl_settings(payload: dict, username: str = Depends(verify_auth)):
     SSL_EXPIRY_NOTIFY = "1" if payload.get("ssl_expiry_notify") else "0"
     update_env_values({"SSL_EXPIRY_NOTIFY": SSL_EXPIRY_NOTIFY})
     return {"ok": True, "ssl_expiry_notify": SSL_EXPIRY_NOTIFY == "1"}
+
+@app.get("/api/interfaces")
+async def api_interfaces(username: str = Depends(verify_auth)):
+    return {
+        "interfaces": collector_instance.list_interfaces(),
+        "pinned": collector_instance.pinned,
+        "current": collector_instance.interface,
+    }
+
+@app.post("/api/interface")
+async def api_set_interface(payload: dict, username: str = Depends(verify_auth)):
+    name = str(payload.get("interface", "")).strip()
+    if name and name not in {item["name"] for item in collector_instance.list_interfaces()}:
+        raise HTTPException(status_code=400, detail="找不到這張網卡")
+    update_env_values({"INTERFACE": name})
+    collector_instance.set_interface(name)
+    return {"ok": True, "pinned": name, "current": collector_instance.interface}
 
 @app.get("/api/realtime")
 async def api_realtime(username: str = Depends(verify_auth)):

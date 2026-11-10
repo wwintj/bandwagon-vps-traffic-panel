@@ -46,6 +46,8 @@ logger = logging.getLogger("uvicorn.error")
 
 class TrafficCollector:
     def __init__(self):
+        # Interface chosen in .env / the panel; empty means follow the default route automatically.
+        self.pinned = INTERFACE
         self.interface = INTERFACE or self._get_default_interface()
         self.running = False
         self.interface_status = False
@@ -105,7 +107,7 @@ class TrafficCollector:
         interfaces = self._read_all_interfaces()
         if self.interface in interfaces:
             rx, tx = interfaces[self.interface]
-            if not INTERFACE and rx == 0 and tx == 0:
+            if not self.pinned and rx == 0 and tx == 0:
                 active_iface = self._get_active_interface()
                 if active_iface and active_iface != self.interface:
                     self.interface = active_iface
@@ -113,7 +115,7 @@ class TrafficCollector:
             self.interface_status = True
             return rx, tx
 
-        detected_iface = self._get_default_interface() if not INTERFACE else ""
+        detected_iface = self._get_default_interface() if not self.pinned else ""
         if detected_iface in interfaces:
             self.interface = detected_iface
             self.interface_status = True
@@ -180,6 +182,22 @@ class TrafficCollector:
             pass
         finally:
             self.flush_to_db()
+
+    def list_interfaces(self):
+        """Interfaces with their counters since boot, for the panel's picker."""
+        default = self._get_default_interface()
+        result = []
+        for name, (rx, tx) in sorted(self._read_all_interfaces().items()):
+            if name == "lo":
+                continue
+            result.append({"name": name, "rx": rx, "tx": tx, "current": name == self.interface, "default": name == default})
+        return result
+
+    def set_interface(self, name):
+        """Pin an interface, or pass "" to go back to automatic detection. The sampling loop sees
+        the interface change and re-anchors its baseline, so nothing is double counted."""
+        self.pinned = name
+        self.interface = name or self._get_default_interface()
 
     def snapshot_pending(self):
         """Copy of the unflushed buckets, safe to hand to a worker thread."""

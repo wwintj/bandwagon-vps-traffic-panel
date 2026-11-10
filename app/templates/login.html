@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登入 · {{ panel_title }}</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+        body { background-color: #0b1120; color: #f8fafc; font-family: "JetBrains Mono", "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC", monospace, sans-serif; }
+        h1 { font-family: "Share Tech Mono", "JetBrains Mono", "Noto Sans TC", monospace; }
+        .form-input { width: 100%; margin-top: 0.375rem; border-radius: 0.375rem; border: 1px solid #334155; background: #020617; padding: 0.625rem 0.75rem; color: #e2e8f0; font-size: 0.875rem; }
+        .form-input:focus { outline: none; border-color: #22d3ee; }
+    </style>
+    <!-- Tailwind utilities after the page styles so they win, as the old runtime injected them last -->
+    <link rel="stylesheet" href="/static/panel.css?v={{ version }}">
+</head>
+<body class="min-h-screen flex items-center justify-center px-4">
+    <main class="w-full max-w-sm">
+        <h1 class="text-2xl text-cyan-400 tracking-wider mb-1 flex items-center gap-2"><span class="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400"></span>{{ panel_title }}</h1>
+        <p class="text-xs text-slate-500 mb-6">請登入以繼續</p>
+        <form id="login-form" class="rounded-xl border border-slate-700 bg-slate-900/70 p-6 space-y-4" autocomplete="on">
+            <label class="block text-xs text-slate-400">帳號
+                <input id="username" name="username" class="form-input" autocomplete="username" required autofocus>
+            </label>
+            <label class="block text-xs text-slate-400">密碼
+                <input id="password" name="password" type="password" class="form-input" autocomplete="current-password" required>
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-300">
+                <input id="remember" type="checkbox" class="h-4 w-4 accent-cyan-400">
+                記住我（30 天）
+            </label>
+            <p id="login-error" class="hidden text-xs text-red-300" role="alert"></p>
+            <button id="login-submit" type="submit" class="w-full rounded bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-bold text-sm py-2.5 transition">登入</button>
+        </form>
+        <p class="mt-4 text-center text-[11px] text-slate-600 font-mono">v{{ version }}</p>
+    </main>
+    <script>
+        document.getElementById('login-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const error = document.getElementById('login-error');
+            const button = document.getElementById('login-submit');
+            error.classList.add('hidden');
+            button.disabled = true;
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'X-Panel-Request': '1' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value,
+                        password: document.getElementById('password').value,
+                        remember: document.getElementById('remember').checked,
+                    }),
+                });
+                if (res.ok) {
+                    window.location.href = '/';
+                    return;
+                }
+                const data = await res.json().catch(() => ({}));
+                error.textContent = data.detail || '登入失敗';
+            } catch (e) {
+                error.textContent = '無法連線到面板';
+            }
+            error.classList.remove('hidden');
+            button.disabled = false;
+            document.getElementById('password').select();
+        });
+    </script>
+</body>
+</html>

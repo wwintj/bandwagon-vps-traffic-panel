@@ -35,6 +35,8 @@
 **管理**
 - 在面板內修改登入帳密、標題、副標題、重置日
 - 版本號顯示在頁尾
+- 登入頁與工作階段：不勾「記住我」閒置 12 小時登出，勾選則 30 天；「退出面板」會真正登出；修改密碼後其他裝置的登入自動失效。腳本仍可用 `curl -u 帳號:密碼` 呼叫 API
+- 點即時速度可在 KB/s 與 Mbps 之間切換；點頁尾的網卡名稱可選擇要監控的網卡（或自動偵測）
 - 密碼只以加鹽雜湊（PBKDF2）保存，`.env` 裡沒有明文
 - 面板停止期間（更新、當機、手動停止）的流量，重新啟動後會自動補回（只要 VPS 沒有重開機）
 
@@ -240,7 +242,7 @@ bash /opt/vps-traffic-panel/scripts/legacy-check.sh remove
 
 ### 自行呼叫 API
 
-API 使用 Basic Auth。GET 可以直接呼叫，POST 需要多帶一個請求頭：
+瀏覽器使用登入頁；腳本可直接用 Basic Auth。GET 可以直接呼叫，POST 需要多帶一個請求頭：
 
 ```bash
 curl -u admin:你的密碼 https://panel.example.com/api/summary
@@ -308,7 +310,7 @@ journalctl -u vps-traffic-panel -n 50
 
 先確認監看服務在運行：`systemctl status vps-traffic-panel-cert.path`。手動套用新證書：`bash /opt/vps-traffic-panel/scripts/cert-watch.sh reload`。
 
-### 提示 Too many failed logins
+### 提示「嘗試次數過多」/ Too many failed logins
 
 同一 IP 錯誤次數太多，等 15 分鐘，或執行 `systemctl restart vps-traffic-panel` 立即解除。
 

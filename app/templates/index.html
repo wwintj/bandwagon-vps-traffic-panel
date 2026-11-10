@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ panel_title }}</title>
-    <script src="/static/tailwindcss-3.4.16.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js" integrity="sha384-o5uz97et3bErHvpKfD4Jz4n0JfhJDWABFuF4NP+iEEDxE1VwMWJ19QGR0lqFZnr6" crossorigin="anonymous"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
@@ -23,6 +22,8 @@
         .form-input { width: 100%; margin-top: 0.5rem; border-radius: 0.375rem; border: 1px solid #334155; background: #020617; padding: 0.625rem 0.75rem; color: #f8fafc; outline: none; }
         .form-input:focus { border-color: #22d3ee; }
     </style>
+    <!-- Tailwind utilities after the page styles so they win, as the old runtime injected them last -->
+    <link rel="stylesheet" href="/static/panel.css?v={{ version }}">
 </head>
 <body class="p-3 md:p-8 max-w-7xl mx-auto">
     
@@ -48,7 +49,7 @@
                 <h3 class="text-slate-400 text-xs uppercase tracking-wider">即時速度</h3>
                 <button id="open-traffic-quota" class="shrink-0 rounded border border-emerald-500/50 px-2.5 py-1 text-[11px] text-emerald-200 hover:border-emerald-300 transition">設定流量</button>
             </div>
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-2 gap-4 cursor-pointer select-none" id="speed-toggle" title="點擊切換 KB/s 與 Mbps">
                 <div class="min-w-0 overflow-hidden">
                     <p class="text-xs text-slate-500 mb-1">↓ 下載</p>
                     <p class="font-mono text-emerald-400 whitespace-nowrap tabular-nums" id="rx-speed"><span class="speed-num text-xl lg:text-lg xl:text-2xl">0</span><span class="speed-unit ml-1 text-xs xl:text-sm opacity-80">B/s</span></p>
@@ -303,6 +304,20 @@
         </div>
     </div>
 
+    <div id="iface-modal" class="modal-backdrop">
+        <div class="card w-full max-w-md max-h-[92vh] overflow-y-auto">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">監控網卡</h2>
+                    <p class="text-xs text-slate-500 mt-1" id="iface-status">流量統計來自所選網卡；切換後從新網卡目前的計數開始累計，不會重複計算</p>
+                </div>
+                <button class="settings-close text-slate-400 hover:text-white text-xl leading-none" data-modal="iface-modal">&times;</button>
+            </div>
+            <div class="space-y-2" id="iface-list"></div>
+            <button id="iface-save" class="mt-4 w-full rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition">保存</button>
+        </div>
+    </div>
+
     <div id="ssl-modal" class="modal-backdrop">
         <div class="card w-full max-w-lg max-h-[92vh] overflow-y-auto">
             <div class="flex items-start justify-between gap-4 mb-5">
@@ -431,7 +446,7 @@
     </div>
 
     <footer class="mt-8 pt-6 border-t border-slate-700 text-slate-500 text-xs text-center space-y-1 pb-8">
-        <p>總下載: <strong class="text-emerald-400 font-mono" id="total-rx">0 B</strong> | 總上傳: <strong class="text-blue-400 font-mono" id="total-tx">0 B</strong> | 總流量統計起點: <strong class="text-slate-300 font-mono" id="total-since">...</strong> | 網卡: <strong id="footer-iface">{{ interface }}</strong> | 維護者 <strong>Tim</strong> | <span class="font-mono">v{{ version }}</span></p>
+        <p>總下載: <strong class="text-emerald-400 font-mono" id="total-rx">0 B</strong> | 總上傳: <strong class="text-blue-400 font-mono" id="total-tx">0 B</strong> | 總流量統計起點: <strong class="text-slate-300 font-mono" id="total-since">...</strong> | 網卡: <button id="open-iface" type="button" class="font-bold underline decoration-dotted underline-offset-2 hover:text-slate-300" title="選擇監控的網卡"><span id="footer-iface">{{ interface }}</span></button> | 維護者 <strong>Tim</strong> | <span class="font-mono">v{{ version }}</span></p>
         <p>本機 IP: <strong class="text-slate-300 font-mono" id="client-ip">...</strong> | 位置: <strong class="text-slate-300" id="client-location">...</strong> | 經緯度: <strong class="text-slate-300 font-mono" id="client-coordinates">...</strong> | 時區: <strong class="text-slate-300 font-mono" id="client-timezone">...</strong> | 網路: <strong class="text-cyan-300" id="client-access-type">...</strong></p>
     </footer>
 
@@ -445,9 +460,16 @@
 
         // Live speed with at most 3 significant digits ("238", "14.0", "1.95"), so the number
         // never grows past 4 characters and the two columns cannot run into each other.
-        function formatSpeed(bytes) {
-            let value = Math.max(0, Number(bytes) || 0);
-            const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+        let speedUnit = 'bytes';
+        try { speedUnit = localStorage.getItem('speedUnit') === 'bits' ? 'bits' : 'bytes'; } catch (e) { /* storage blocked */ }
+        const lastSpeed = { 'rx-speed': 0, 'tx-speed': 0 };
+
+        function formatSpeed(bytes, unitMode = speedUnit) {
+            const bits = unitMode === 'bits';
+            // Bandwidth is usually quoted in decimal bits per second (1 Mbps = 1,000,000 bit/s).
+            let value = Math.max(0, Number(bytes) || 0) * (bits ? 8 : 1);
+            const units = bits ? ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'] : ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+            const base = bits ? 1000 : 1024;
             const show = (v, unitIndex) => v === 0 ? '0'
                 : v >= 100 || unitIndex === 0 ? v.toFixed(0)
                 : v >= 10 ? v.toFixed(1)
@@ -455,18 +477,26 @@
             let i = 0;
             // Move up a unit when the rounded number would reach 1000 (e.g. 999.9 KB/s -> 0.98 MB/s).
             while (Number(show(value, i)) >= 1000 && i < units.length - 1) {
-                value /= 1024;
+                value /= base;
                 i++;
             }
             return { num: show(value, i), unit: units[i] };
         }
 
+        function toggleSpeedUnit() {
+            speedUnit = speedUnit === 'bits' ? 'bytes' : 'bits';
+            try { localStorage.setItem('speedUnit', speedUnit); } catch (e) { /* storage blocked */ }
+            setSpeed('rx-speed', lastSpeed['rx-speed']);
+            setSpeed('tx-speed', lastSpeed['tx-speed']);
+        }
+
         function setSpeed(id, bytes) {
+            lastSpeed[id] = bytes;
             const el = document.getElementById(id);
             const { num, unit } = formatSpeed(bytes);
             el.querySelector('.speed-num').textContent = num;
             el.querySelector('.speed-unit').textContent = unit;
-            el.title = `${formatBytes(bytes, true)}`;
+            el.title = `${formatBytes(bytes, true)} · ${(Math.max(0, Number(bytes) || 0) * 8 / 1e6).toFixed(2)} Mbps`;
         }
 
         function bytesToQuotaInput(bytes) {
@@ -804,6 +834,72 @@
             btn.disabled = false;
         }
 
+        async function openInterfacePicker() {
+            openModal('iface-modal');
+            const list = document.getElementById('iface-list');
+            list.textContent = '讀取中...';
+            try {
+                const res = await fetch('/api/interfaces');
+                const data = await res.json();
+                const option = (value, title, detail, checked, badges) => {
+                    const row = document.createElement('label');
+                    row.className = 'flex items-start gap-2 rounded border border-slate-700 hover:border-emerald-400 p-2.5 text-xs cursor-pointer';
+                    const radio = document.createElement('input');
+                    radio.type = 'radio';
+                    radio.name = 'iface';
+                    radio.value = value;
+                    radio.checked = checked;
+                    radio.className = 'mt-0.5 accent-emerald-400';
+                    const text = document.createElement('div');
+                    const head = document.createElement('p');
+                    head.className = 'font-mono font-semibold text-slate-100';
+                    head.textContent = title;
+                    badges.forEach(([label, tone]) => {
+                        const b = document.createElement('span');
+                        b.className = `ml-2 rounded border px-1.5 py-0.5 text-[10px] font-normal ${tone}`;
+                        b.textContent = label;
+                        head.appendChild(b);
+                    });
+                    const sub = document.createElement('p');
+                    sub.className = 'mt-0.5 text-slate-500';
+                    sub.textContent = detail;
+                    text.append(head, sub);
+                    row.append(radio, text);
+                    return row;
+                };
+                const rows = [option('', '自動偵測（建議）', `跟隨預設路由，目前是 ${data.current}`, !data.pinned, [])];
+                data.interfaces.forEach((iface) => {
+                    const badges = [];
+                    if (iface.current) badges.push(['使用中', 'border-emerald-500/60 text-emerald-300']);
+                    if (iface.default) badges.push(['預設路由', 'border-sky-500/60 text-sky-300']);
+                    rows.push(option(iface.name, iface.name, `開機以來 ↓ ${formatBytes(iface.rx)} · ↑ ${formatBytes(iface.tx)}`, data.pinned === iface.name, badges));
+                });
+                list.replaceChildren(...rows);
+            } catch (e) {
+                list.textContent = '讀取網卡失敗';
+            }
+        }
+
+        async function saveInterface() {
+            const selected = document.querySelector('input[name="iface"]:checked');
+            const status = document.getElementById('iface-status');
+            if (!selected) return;
+            try {
+                const res = await fetch('/api/interface', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ interface: selected.value })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || res.statusText);
+                document.getElementById('footer-iface').textContent = data.current;
+                closeModal('iface-modal');
+                fetchSystem();
+            } catch (e) {
+                status.textContent = `保存失敗：${e.message}`;
+            }
+        }
+
         function formatCoordinates(lat, lon) {
             if (lat === null || lat === undefined || lon === null || lon === undefined) return 'Unknown';
             return `${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}`;
@@ -811,10 +907,13 @@
 
         // Every API call carries this header; the server rejects POSTs without it (CSRF guard).
         const nativeFetch = window.fetch.bind(window);
-        window.fetch = (input, init = {}) => {
+        window.fetch = async (input, init = {}) => {
             const headers = new Headers(init.headers || {});
             headers.set('X-Panel-Request', '1');
-            return nativeFetch(input, { ...init, headers });
+            const response = await nativeFetch(input, { ...init, headers, credentials: 'same-origin' });
+            // Session expired or signed out elsewhere: back to the login page.
+            if (response.status === 401) window.location.href = '/login';
+            return response;
         };
 
         function escapeHtml(value) {
@@ -1240,8 +1339,8 @@
         }
 
         function logoutPanel() {
-            fetch('/logout', { headers: { Authorization: 'Basic logout' } }).finally(() => {
-                window.location.href = '/logout';
+            fetch('/api/logout', { method: 'POST' }).finally(() => {
+                window.location.href = '/login';
             });
         }
 
@@ -1271,7 +1370,7 @@
                 document.getElementById('panel-title').innerText = savedTitle;
                 document.getElementById('panel-subtitle').innerText = savedSubtitle;
                 document.title = savedTitle;
-                status.innerText = mode === 'auth' ? '已保存。請重新開啟頁面並用新帳密登入。' : '已保存，面板文字已更新。';
+                status.innerText = mode === 'auth' ? '已保存。其他裝置的登入已失效，這個瀏覽器保持登入。' : '已保存，面板文字已更新。';
                 closeModal(mode === 'auth' ? 'auth-modal' : 'panel-modal');
             } catch (e) {
                 status.innerText = mode === 'auth'
@@ -1538,6 +1637,9 @@
         document.getElementById('migrate-load').addEventListener('click', loadBandwagonLocations);
         document.getElementById('migrate-start').addEventListener('click', startBandwagonMigration);
         document.getElementById('vps-restart').addEventListener('click', restartVps);
+        document.getElementById('open-iface').addEventListener('click', openInterfacePicker);
+        document.getElementById('iface-save').addEventListener('click', saveInterface);
+        document.getElementById('speed-toggle').addEventListener('click', toggleSpeedUnit);
         document.getElementById('traffic-quota-save').addEventListener('click', saveTrafficQuotaSettings);
         document.getElementById('logout-panel').addEventListener('click', logoutPanel);
         document.getElementById('traffic-reset').addEventListener('click', resetTraffic);

@@ -108,7 +108,8 @@ def test_password_with_unsafe_characters_rejected(client, post_headers):
 
 
 def test_static_and_index(client, auth):
-    assert client.get("/static/tailwindcss-3.4.16.js").status_code == 200
+    css = client.get("/static/panel.css")
+    assert css.status_code == 200 and len(css.content) < 60_000   # prebuilt, not the 450 KB runtime
     page = client.get("/", headers=auth)
     assert page.status_code == 200
     assert "v" + __import__("app").__version__ in page.text

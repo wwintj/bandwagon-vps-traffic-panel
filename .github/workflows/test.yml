@@ -24,6 +24,17 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q tests
 
+  css:
+    # The committed app/static/panel.css must match what Tailwind builds from the templates.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npx --yes tailwindcss@3.4.16 -c tailwind.config.js -i app/static/src/panel.input.css -o app/static/panel.css --minify
+      - run: git diff --exit-code app/static/panel.css || (echo "panel.css is stale - rebuild it with the command in tailwind.config.js" && exit 1)
+
   shell:
     runs-on: ubuntu-latest
     steps:

@@ -73,11 +73,27 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.7.0"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.8.0"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"
 check "CSRF guard active"
+
+JAR=/tmp/e2e-cookies.txt
+rm -f "$JAR"
+code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' "$URL/")
+[ "$code" = 302 ] || die "page without login should redirect, got $code"
+code=$(curl -sk "${RESOLVE[@]}" -c "$JAR" -o /dev/null -w '%{http_code}' -H 'X-Panel-Request: 1' -H 'Content-Type: application/json' \
+    -d "{\"username\": \"admin\", \"password\": \"$PASS\"}" "$URL/api/login")
+[ "$code" = 200 ] || die "login failed: $code"
+grep -q "vps_panel_session" "$JAR" || die "no session cookie"
+grep -q "TRUE.*/.*TRUE" "$JAR" || die "session cookie not marked Secure over HTTPS"
+code=$(curl -sk "${RESOLVE[@]}" -b "$JAR" -o /dev/null -w '%{http_code}' "$URL/")
+[ "$code" = 200 ] || die "logged-in page returned $code"
+curl -sk "${RESOLVE[@]}" -b "$JAR" -c "$JAR" -o /dev/null -X POST -H 'X-Panel-Request: 1' "$URL/api/logout"
+code=$(curl -sk "${RESOLVE[@]}" -b "$JAR" -o /dev/null -w '%{http_code}' "$URL/api/summary")
+[ "$code" = 401 ] || die "still logged in after logout: $code"
+check "login page, secure session cookie and logout through Nginx"
 
 ssl_json=$(curl -s -u "admin:$PASS" "http://127.0.0.1:8088/api/ssl-status?refresh=1")
 echo "  ssl-status: $ssl_json"
