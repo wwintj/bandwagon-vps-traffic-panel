@@ -48,14 +48,14 @@
                 <h3 class="text-slate-400 text-xs uppercase tracking-wider">即時速度</h3>
                 <button id="open-traffic-quota" class="shrink-0 rounded border border-emerald-500/50 px-2.5 py-1 text-[11px] text-emerald-200 hover:border-emerald-300 transition">設定流量</button>
             </div>
-            <div class="grid grid-cols-2 gap-3">
-                <div>
+            <div class="grid grid-cols-2 gap-4">
+                <div class="min-w-0 overflow-hidden">
                     <p class="text-xs text-slate-500 mb-1">↓ 下載</p>
-                    <p class="text-lg xl:text-xl font-mono text-emerald-400 whitespace-nowrap tabular-nums" id="rx-speed">0 B/s</p>
+                    <p class="font-mono text-emerald-400 whitespace-nowrap tabular-nums" id="rx-speed"><span class="speed-num text-xl lg:text-lg xl:text-2xl">0</span><span class="speed-unit ml-1 text-xs xl:text-sm opacity-80">B/s</span></p>
                 </div>
-                <div>
+                <div class="min-w-0 overflow-hidden">
                     <p class="text-xs text-slate-500 mb-1">↑ 上傳</p>
-                    <p class="text-lg xl:text-xl font-mono text-blue-400 whitespace-nowrap tabular-nums" id="tx-speed">0 B/s</p>
+                    <p class="font-mono text-blue-400 whitespace-nowrap tabular-nums" id="tx-speed"><span class="speed-num text-xl lg:text-lg xl:text-2xl">0</span><span class="speed-unit ml-1 text-xs xl:text-sm opacity-80">B/s</span></p>
                 </div>
             </div>
             <div class="mt-4">
@@ -92,8 +92,8 @@
                     <p class="text-sm font-mono text-white"><span id="month-rx">0 B</span><br><span class="text-slate-400" id="month-tx">0 B</span></p>
                 </div>
             </div>
-            <div class="mt-3 flex items-center gap-1.5 text-[11px]">
-                <p class="min-w-0 flex-1 whitespace-nowrap text-slate-500" id="reset-day">每月 1 日重置</p>
+            <div class="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-2 text-[11px]">
+                <p class="mr-auto whitespace-nowrap text-slate-500" id="reset-day">每月 1 日重置</p>
                 <button id="traffic-reset" class="shrink-0 whitespace-nowrap rounded border border-red-500/50 px-1.5 py-1 text-red-300 hover:bg-red-500/10 transition">重置流量</button>
                 <button id="open-reset-day" class="shrink-0 whitespace-nowrap rounded border border-slate-600 px-1.5 py-1 text-slate-200 hover:border-cyan-400 transition">修改日期</button>
             </div>
@@ -352,6 +352,32 @@
             const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.max(0, Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k))));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i] + (isSpeed ? '/s' : '');
+        }
+
+        // Live speed with at most 3 significant digits ("238", "14.0", "1.95"), so the number
+        // never grows past 4 characters and the two columns cannot run into each other.
+        function formatSpeed(bytes) {
+            let value = Math.max(0, Number(bytes) || 0);
+            const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+            const show = (v, unitIndex) => v === 0 ? '0'
+                : v >= 100 || unitIndex === 0 ? v.toFixed(0)
+                : v >= 10 ? v.toFixed(1)
+                : v.toFixed(2);
+            let i = 0;
+            // Move up a unit when the rounded number would reach 1000 (e.g. 999.9 KB/s -> 0.98 MB/s).
+            while (Number(show(value, i)) >= 1000 && i < units.length - 1) {
+                value /= 1024;
+                i++;
+            }
+            return { num: show(value, i), unit: units[i] };
+        }
+
+        function setSpeed(id, bytes) {
+            const el = document.getElementById(id);
+            const { num, unit } = formatSpeed(bytes);
+            el.querySelector('.speed-num').textContent = num;
+            el.querySelector('.speed-unit').textContent = unit;
+            el.title = `${formatBytes(bytes, true)}`;
         }
 
         function bytesToQuotaInput(bytes) {
@@ -863,8 +889,8 @@
             try {
                 const res = await fetch('/api/realtime');
                 const data = await res.json();
-                document.getElementById('rx-speed').innerText = formatBytes(data.rx_speed, true);
-                document.getElementById('tx-speed').innerText = formatBytes(data.tx_speed, true);
+                setSpeed('rx-speed', data.rx_speed);
+                setSpeed('tx-speed', data.tx_speed);
             } catch (e) {
                 console.error("Error fetching /api/realtime:", e);
             }
