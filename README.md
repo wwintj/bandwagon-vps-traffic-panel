@@ -30,11 +30,13 @@
 **整合**
 - Telegram 每日流量推送（自訂時區與時間），含 Bandwagon 官方配額、剩餘流量與距離重置天數
 - Cloudflare DDNS：公網 IP 變動時自動更新 A 記錄（只需 Token 與域名，自動偵測 Zone，變更 / 失敗發 Telegram 通知）
-- Bandwagon（搬瓦工）：查詢官方配額、讀取可用機房、一鍵切換機房並追蹤新 IP 與 DNS 生效
+- Bandwagon（搬瓦工）：查詢官方配額、讀取可用機房（使用官方機房名稱與流量倍率）、一鍵切換機房並追蹤新 IP 與 DNS 生效、一鍵重啟 VPS；「伺服器信息」顯示方案配置（記憶體 / 硬碟 / Swap）
 
 **管理**
 - 在面板內修改登入帳密、標題、副標題、重置日
 - 版本號顯示在頁尾
+- 密碼只以加鹽雜湊（PBKDF2）保存，`.env` 裡沒有明文
+- 面板停止期間（更新、當機、手動停止）的流量，重新啟動後會自動補回（只要 VPS 沒有重開機）
 
 ## 系統需求
 
@@ -163,7 +165,7 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 | 變數 | 說明 | 預設 |
 | --- | --- | --- |
 | `HOST` / `PORT` | 監聽地址與端口 | 由安裝腳本決定 |
-| `AUTH_USERNAME` / `AUTH_PASSWORD` | 登入帳密，**未設定密碼時面板拒絕所有登入** | — |
+| `AUTH_USERNAME` / `AUTH_PASSWORD_HASH` | 登入帳號與密碼雜湊（PBKDF2）。也可暫時填 `AUTH_PASSWORD=明文`，面板啟動時會自動轉成雜湊；**未設定密碼時面板拒絕所有登入** | — |
 | `PANEL_TITLE` / `PANEL_SUBTITLE` | 面板標題與副標題 | |
 | `INTERFACE` | 指定網卡，留空自動偵測 | 空 |
 | `MONTH_RESET_DAY` | 每月流量重置日（1–31，月份天數不足時取月底） | `1` |
@@ -312,7 +314,7 @@ journalctl -u vps-traffic-panel -n 50
 
 ### 忘記密碼 / 提示 AUTH_PASSWORD is not configured
 
-直接編輯 `.env`，修改或補上 `AUTH_PASSWORD=新密碼`，然後重啟服務：
+`.env` 只保存密碼的雜湊值（`AUTH_PASSWORD_HASH`），無法從中看出原密碼。要重設密碼：編輯 `.env`，**刪掉** `AUTH_PASSWORD_HASH=` 那一行，加上 `AUTH_PASSWORD=新密碼`，然後重啟服務。面板啟動時會自動把它轉成雜湊並移除明文：
 
 ```bash
 nano /opt/vps-traffic-panel/.env

@@ -62,6 +62,10 @@ ss -Htln 'sport = :8088' | grep -q '0.0.0.0:8088' && die "backend exposed on 0.0
 check "backend bound to localhost"
 [ "$(systemctl show -p User --value vps-traffic-panel)" = "vps-traffic-panel" ] || die "service should run as vps-traffic-panel"
 check "runs as unprivileged user"
+grep -q '^AUTH_PASSWORD=' /opt/vps-traffic-panel/.env && die "plaintext password written to .env"
+grep -q '^AUTH_PASSWORD_HASH=pbkdf2_sha256:' /opt/vps-traffic-panel/.env || die "password hash missing from .env"
+grep -q "$PASS" /opt/vps-traffic-panel/.env && die "password appears in .env"
+check "only a password hash is stored"
 [ -L /usr/local/bin/vps-panel ] || die "vps-panel shortcut missing"
 check "vps-panel shortcut installed"
 
@@ -69,7 +73,7 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.6.1"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.7.0"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"

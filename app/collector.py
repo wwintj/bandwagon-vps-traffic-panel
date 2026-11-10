@@ -1,10 +1,46 @@
 import asyncio
+import json
 import os
 import time
 import logging
-from app.database import save_traffic_increment
+from datetime import timedelta
+from app.database import save_traffic_increment, get_meta_value, set_meta_value
 from app import timeutil
 from app.config import INTERFACE
+
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+
+def read_boot_id():
+    try:
+        with open(BOOT_ID_PATH) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def spread_over_hours(start, end, rx, tx):
+    """Split rx/tx bytes over the hourly buckets between two panel-time datetimes, by elapsed time."""
+    if end <= start:
+        return [((end.year, end.month, end.day, end.hour), rx, tx)]
+    segments = []
+    cursor = start
+    while cursor < end:
+        boundary = cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        segment_end = min(boundary, end)
+        segments.append(((cursor.year, cursor.month, cursor.day, cursor.hour), (segment_end - cursor).total_seconds()))
+        cursor = segment_end
+    total = sum(seconds for _, seconds in segments)
+    result, given_rx, given_tx = [], 0, 0
+    for index, (bucket, seconds) in enumerate(segments):
+        if index == len(segments) - 1:
+            part_rx, part_tx = rx - given_rx, tx - given_tx
+        else:
+            part_rx, part_tx = int(rx * seconds / total), int(tx * seconds / total)
+        given_rx += part_rx
+        given_tx += part_tx
+        result.append((bucket, part_rx, part_tx))
+    return result
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -93,6 +129,11 @@ class TrafficCollector:
     async def start(self):
         self.running = True
         self.last_rx, self.last_tx = self._read_net_dev()
+        if self.interface_status:
+            try:
+                self.recover_downtime(self.last_rx, self.last_tx)
+            except Exception as exc:
+                logger.warning("Could not recover traffic from while the panel was stopped: %s", exc)
         
         try:
             while self.running:
@@ -152,5 +193,39 @@ class TrafficCollector:
         for (y, m, d, h), traffic in buckets_to_flush.items():
             if traffic["rx"] > 0 or traffic["tx"] > 0:
                 save_traffic_increment(traffic["rx"], traffic["tx"], y, m, d, h)
+        self.save_counter_state()
+
+    def save_counter_state(self):
+        """Remember the kernel counters that are already accounted for, so traffic that happens while
+        the panel is stopped (crash, update, manual stop) can be recovered on the next start."""
+        if not self.interface_status:
+            return
+        set_meta_value("collector_state", json.dumps({
+            "boot_id": read_boot_id(),
+            "iface": self.interface,
+            "rx": self.last_rx,
+            "tx": self.last_tx,
+            "at": time.time(),
+        }))
+
+    def recover_downtime(self, rx, tx):
+        """Add traffic counted by the kernel since the last saved state, if the machine has not
+        rebooted (same boot id) and the interface is the same. Returns (rx, tx) recovered."""
+        try:
+            state = json.loads(get_meta_value("collector_state", "") or "{}")
+        except ValueError:
+            return 0, 0
+        boot_id = read_boot_id()
+        if not state or not boot_id or state.get("boot_id") != boot_id or state.get("iface") != self.interface:
+            return 0, 0
+        gap_rx, gap_tx = rx - int(state.get("rx", 0)), tx - int(state.get("tx", 0))
+        if gap_rx < 0 or gap_tx < 0 or (gap_rx == 0 and gap_tx == 0):
+            return 0, 0
+        start = timeutil.from_unix(state.get("at", time.time()))
+        for (y, m, d, h), part_rx, part_tx in spread_over_hours(start, timeutil.now(), gap_rx, gap_tx):
+            if part_rx or part_tx:
+                save_traffic_increment(part_rx, part_tx, y, m, d, h)
+        logger.info("Recovered %s down / %s up bytes counted while the panel was stopped", gap_rx, gap_tx)
+        return gap_rx, gap_tx
 
 collector_instance = TrafficCollector()

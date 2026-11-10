@@ -25,11 +25,12 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY, PORT, HTTPS_MODE, HTTPS_PORT, PANEL_DOMAIN, SSL_CERTFILE, SSL_EXPIRY_NOTIFY, CERTCTL_DIR
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, AUTH_PASSWORD_HASH, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE, VPS_EXPIRY_NOTIFY, PORT, HTTPS_MODE, HTTPS_PORT, PANEL_DOMAIN, SSL_CERTFILE, SSL_EXPIRY_NOTIFY, CERTCTL_DIR
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
 from app import sslinfo
+from app import passwords
 from app import __version__
 
 security = HTTPBasic()
@@ -81,6 +82,38 @@ def record_auth_failure(client_ip, username, password):
     digest = hashlib.sha256(f"{username}\0{password}".encode("utf-8")).hexdigest()[:16]
     failures.append((now, digest))
 
+VERIFIED_CREDENTIALS = set()
+
+def credentials_configured():
+    return bool(AUTH_USERNAME and (AUTH_PASSWORD_HASH or AUTH_PASSWORD))
+
+def check_credentials(username, password):
+    """Compare against the stored hash. PBKDF2 is deliberately slow, and the page polls several
+    endpoints a second, so remember credentials that already verified (in memory only)."""
+    user_ok = secrets.compare_digest(username.encode("utf8"), AUTH_USERNAME.encode("utf8"))
+    if AUTH_PASSWORD_HASH:
+        key = hashlib.sha256(f"{username}\0{password}\0{AUTH_PASSWORD_HASH}".encode("utf8")).digest()
+        if key in VERIFIED_CREDENTIALS:
+            return user_ok
+        if user_ok and passwords.verify_password(password, AUTH_PASSWORD_HASH):
+            if len(VERIFIED_CREDENTIALS) > 16:
+                VERIFIED_CREDENTIALS.clear()
+            VERIFIED_CREDENTIALS.add(key)
+            return True
+        return False
+    return user_ok and secrets.compare_digest(password.encode("utf8"), AUTH_PASSWORD.encode("utf8"))
+
+def migrate_plaintext_password():
+    """Replace a plaintext AUTH_PASSWORD in .env (older installs) with AUTH_PASSWORD_HASH."""
+    global AUTH_PASSWORD, AUTH_PASSWORD_HASH
+    if not AUTH_PASSWORD or AUTH_PASSWORD_HASH:
+        return False
+    hashed = passwords.hash_password(AUTH_PASSWORD)
+    update_env_values({"AUTH_PASSWORD_HASH": hashed, "AUTH_PASSWORD": None})
+    AUTH_PASSWORD_HASH, AUTH_PASSWORD = hashed, ""
+    logger.info("Stored the panel password as a salted hash and removed the plaintext from .env")
+    return True
+
 def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
     client_ip = get_client_ip(request)
     if is_auth_locked(client_ip):
@@ -88,16 +121,13 @@ def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(se
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed logins. Try again in 15 minutes.",
         )
-    if not AUTH_USERNAME or not AUTH_PASSWORD:
+    if not credentials_configured():
         # Missing credentials in .env must lock the panel, never fall back to a default password.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AUTH_USERNAME / AUTH_PASSWORD is not configured in .env",
         )
-    is_user_ok = secrets.compare_digest(credentials.username.encode("utf8"), AUTH_USERNAME.encode("utf8"))
-    is_pass_ok = secrets.compare_digest(credentials.password.encode("utf8"), AUTH_PASSWORD.encode("utf8"))
-    
-    if not (is_user_ok and is_pass_ok):
+    if not check_credentials(credentials.username, credentials.password):
         record_auth_failure(client_ip, credentials.username, credentials.password)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -109,8 +139,12 @@ def verify_auth(request: Request, credentials: HTTPBasicCredentials = Depends(se
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not AUTH_USERNAME or not AUTH_PASSWORD:
+    if not credentials_configured():
         logger.error("AUTH_USERNAME / AUTH_PASSWORD is empty; the panel will reject all logins until .env is fixed.")
+    try:
+        migrate_plaintext_password()
+    except Exception as exc:
+        logger.warning("Could not migrate the plaintext password to a hash: %s", exc)
     init_db()
     collector_task = asyncio.create_task(collector_instance.start())
     telegram_task = asyncio.create_task(telegram_daily_notifier())
@@ -244,6 +278,11 @@ def update_env_values(updates):
                     order.append(key)
 
     for key, value in updates.items():
+        if value is None:
+            # None removes the key from .env
+            existing.pop(key, None)
+            order = [k for k in order if k != key]
+            continue
         existing[key] = str(value)
         if key not in order:
             order.append(key)
@@ -534,14 +573,21 @@ def fetch_bandwagon_info():
         return {"error": "暫時無法連接 Bandwagon 官方 API，請稍後再試或檢查 VEID / API Key。"}
     if data.get("error"):
         return {"error": data.get("message") or data.get("error")}
-    used = int(data.get("data_counter") or 0) * int(data.get("monthly_data_multiplier") or 1)
-    limit = int(data.get("plan_monthly_data") or 0) * int(data.get("monthly_data_multiplier") or 1)
+    multiplier = int(data.get("monthly_data_multiplier") or 1)
+    used = int(data.get("data_counter") or 0) * multiplier
+    limit = int(data.get("plan_monthly_data") or 0) * multiplier
     return {
         "used": used,
         "limit": limit,
         "reset": data.get("data_next_reset") or "",
         "hostname": data.get("hostname") or "",
         "node": data.get("node_location") or data.get("node_alias") or data.get("location") or data.get("datacenter") or "",
+        "multiplier": multiplier,
+        "suspended": bool(data.get("suspended")),
+        "plan_ram": int(data.get("plan_ram") or 0),
+        "plan_swap": int(data.get("plan_swap") or 0),
+        "plan_disk": int(data.get("plan_disk") or 0),
+        "os": data.get("os") or "",
     }
 
 def fetch_bandwagon_info_cached(force=False):
@@ -895,6 +941,27 @@ def normalize_bandwagon_locations(data):
         if code and f"[{code}]" not in base:
             base = f"{base} [{code}]"
         return base
+
+    # KiwiVM's migrate/getLocations: {"currentLocation": "USCA_8", "locations": ["USCA_2", ...],
+    # "descriptions": {"USCA_2": "US: California, Los Angeles (DC2) ..."}, "dataTransferMultipliers": {...}}
+    if isinstance(data, dict) and isinstance(data.get("locations"), list) and isinstance(data.get("descriptions"), dict):
+        descriptions = data["descriptions"]
+        multipliers = data.get("dataTransferMultipliers") if isinstance(data.get("dataTransferMultipliers"), dict) else {}
+        result = []
+        for code in data["locations"]:
+            code = str(code)
+            name = str(descriptions.get(code) or "").strip() or infer_bandwagon_location_label(code)
+            if f"[{code}]" not in name:
+                name = f"{name} [{code}]"
+            try:
+                multiplier = float(multipliers.get(code) or 1)
+            except (TypeError, ValueError):
+                multiplier = 1
+            if multiplier > 1:
+                name = f"{name}（流量 ×{multiplier:g}）"
+            result.append({"code": code, "name": name, "available": True})
+        if result:
+            return result
 
     source = data
     for key in ("locations", "data", "available_locations"):
@@ -1360,7 +1427,7 @@ async def api_get_settings(username: str = Depends(verify_auth)):
 
 @app.post("/api/settings")
 async def api_update_settings(payload: dict, username: str = Depends(verify_auth)):
-    global AUTH_USERNAME, AUTH_PASSWORD, PANEL_TITLE, PANEL_SUBTITLE
+    global AUTH_USERNAME, AUTH_PASSWORD, AUTH_PASSWORD_HASH, PANEL_TITLE, PANEL_SUBTITLE
 
     new_username = str(payload.get("auth_username", "")).strip()
     new_password = str(payload.get("auth_password", "")).strip()
@@ -1380,12 +1447,15 @@ async def api_update_settings(payload: dict, username: str = Depends(verify_auth
         "PANEL_SUBTITLE": new_subtitle,
     }
     if new_password:
-        updates["AUTH_PASSWORD"] = new_password
+        new_hash = passwords.hash_password(new_password)
+        updates["AUTH_PASSWORD_HASH"] = new_hash
+        updates["AUTH_PASSWORD"] = None
 
     update_env_values(updates)
     AUTH_USERNAME = new_username
     if new_password:
-        AUTH_PASSWORD = new_password
+        AUTH_PASSWORD_HASH, AUTH_PASSWORD = new_hash, ""
+        VERIFIED_CREDENTIALS.clear()
     PANEL_TITLE = new_title
     PANEL_SUBTITLE = new_subtitle
 
@@ -1542,9 +1612,17 @@ async def api_bandwagon_locations(username: str = Depends(verify_auth)):
                 continue
             locations = normalize_bandwagon_locations(data)
             if locations:
-                service_info = await run_blocking(fetch_bandwagon_info)
-                if service_info and not service_info.get("error"):
-                    current_location = match_current_location_label(service_info.get("node"), locations)
+                current_code = str(data.get("currentLocation") or "") if isinstance(data, dict) else ""
+                descriptions = data.get("descriptions") if isinstance(data, dict) and isinstance(data.get("descriptions"), dict) else {}
+                if current_code:
+                    # The API names the current location directly; it is not in the migratable list.
+                    current_location = str(descriptions.get(current_code) or "").strip() or infer_bandwagon_location_label(current_code)
+                    if f"[{current_code}]" not in current_location:
+                        current_location = f"{current_location} [{current_code}]"
+                else:
+                    service_info = await run_blocking(fetch_bandwagon_info)
+                    if service_info and not service_info.get("error"):
+                        current_location = match_current_location_label(service_info.get("node"), locations)
                 return {"ok": True, "locations": locations, "current_location": current_location}
         except Exception as exc:
             errors.append(str(exc))
@@ -1590,6 +1668,19 @@ async def api_bandwagon_migrate(payload: dict, username: str = Depends(verify_au
             errors.append(str(exc))
     set_meta_value("migration_active", "0")
     raise HTTPException(status_code=400, detail="切換機房請求失敗：" + "；".join(errors))
+
+@app.post("/api/bandwagon/restart")
+async def api_bandwagon_restart(username: str = Depends(verify_auth)):
+    try:
+        data = await run_blocking(bandwagon_request, "restart")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"重啟請求失敗：{exc}")
+    if data.get("error"):
+        raise HTTPException(status_code=400, detail=f"重啟請求失敗：{data.get('message') or data.get('error')}")
+    await run_blocking(send_telegram_notice, migration_telegram_message("VPS 重啟指令已送出", [
+        "由面板發起重啟，約 1 分鐘內恢復。",
+    ]))
+    return {"ok": True}
 
 @app.get("/api/bandwagon/migrate-status")
 async def api_bandwagon_migrate_status(username: str = Depends(verify_auth)):
@@ -1773,6 +1864,12 @@ def get_load_average():
     except (AttributeError, OSError):
         return None
 
+def bandwagon_plan_summary():
+    bw = fetch_bandwagon_info_cached()
+    if not bw or bw.get("error"):
+        return None
+    return {key: bw.get(key) for key in ("suspended", "plan_ram", "plan_swap", "plan_disk", "os", "multiplier", "node")}
+
 def build_system_info(client_ip):
     """Blocking: public IP lookups, ip-api calls and a 0.1s CPU sample. Run via run_blocking."""
     ip, ip_info = get_cached_public_ip_info()
@@ -1804,6 +1901,7 @@ def build_system_info(client_ip):
         "ip_org": ip_info.get("org") or "Unknown",
         "ip_as": ip_info.get("as") or "Unknown",
         "ip_type": classify_ip_info(ip_info),
+        "bandwagon": bandwagon_plan_summary(),
         "hostname": platform.node(),
         "uptime": uptime,
         "cpu_count": psutil.cpu_count(logical=True),

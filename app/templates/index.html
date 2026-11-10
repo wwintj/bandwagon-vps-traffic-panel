@@ -73,9 +73,11 @@
                 <span id="ip-type" class="shrink-0 whitespace-nowrap rounded border border-cyan-400/50 bg-cyan-400/10 px-2.5 py-1 text-[11px] text-cyan-300" title="IP 類型">...</span>
             </div>
             <div class="text-xs text-slate-500 space-y-1">
+                <p id="bw-suspended-row" class="hidden font-semibold text-red-300">狀態: 已被搬瓦工暫停，請到 KiwiVM 查看原因</p>
                 <p>位置: <span id="ip-location" class="text-slate-200">...</span></p>
                 <p>ISP: <span id="ip-isp" class="text-slate-300">...</span></p>
                 <p>ASN: <span id="ip-as" class="text-slate-400">...</span></p>
+                <p id="bw-plan-row" class="hidden">方案: <span id="bw-plan" class="text-slate-300"></span></p>
                 <p id="vps-expiry-row" class="hidden">到期: <span id="vps-expiry" class="text-slate-200 font-mono"></span></p>
                 <p>SSL: <button id="ssl-summary" type="button" class="font-mono text-slate-400 underline decoration-dotted underline-offset-2 hover:text-slate-200" title="查看目前使用的 SSL 證書">檢查中...</button></p>
             </div>
@@ -419,6 +421,11 @@
                     <button id="migrate-load" class="w-full rounded border border-violet-500/60 hover:border-violet-300 text-violet-200 font-bold text-sm py-2.5 transition">讀取機房</button>
                     <button id="migrate-start" class="w-full rounded bg-violet-500 hover:bg-violet-400 text-slate-950 font-bold text-sm py-2.5 transition">確認切換</button>
                 </div>
+                <div class="border-t border-slate-700 pt-4 space-y-2">
+                    <h3 class="text-sm font-bold text-slate-200">重啟 VPS</h3>
+                    <p class="text-[11px] text-slate-500" id="restart-status">透過 KiwiVM API 重啟整台 VPS，面板會中斷約 1 分鐘，恢復後自動通知。</p>
+                    <button id="vps-restart" class="w-full rounded border border-red-500/60 hover:bg-red-500/10 text-red-300 font-bold text-sm py-2.5 transition">重啟 VPS</button>
+                </div>
             </div>
         </div>
     </div>
@@ -742,6 +749,59 @@
             } catch (e) {
                 console.error("Error saving /api/ssl-settings:", e);
             }
+        }
+
+        function renderBandwagonPlan(bw) {
+            const planRow = document.getElementById('bw-plan-row');
+            const suspendedRow = document.getElementById('bw-suspended-row');
+            if (!bw) {
+                planRow.classList.add('hidden');
+                suspendedRow.classList.add('hidden');
+                return;
+            }
+            const parts = [];
+            if (bw.plan_ram) parts.push(`${formatBytes(bw.plan_ram)} 記憶體`);
+            if (bw.plan_disk) parts.push(`${formatBytes(bw.plan_disk)} 硬碟`);
+            if (bw.plan_swap) parts.push(`${formatBytes(bw.plan_swap)} Swap`);
+            if (bw.multiplier && bw.multiplier > 1) parts.push(`流量 ×${bw.multiplier}`);
+            document.getElementById('bw-plan').textContent = parts.join(' · ');
+            planRow.classList.toggle('hidden', parts.length === 0);
+            suspendedRow.classList.toggle('hidden', !bw.suspended);
+        }
+
+        async function restartVps() {
+            const status = document.getElementById('restart-status');
+            const btn = document.getElementById('vps-restart');
+            if (!confirm('確定要重啟整台 VPS 嗎？\n\n所有服務會中斷約 1 分鐘，未儲存的資料可能遺失。')) return;
+            btn.disabled = true;
+            status.textContent = '正在送出重啟指令...';
+            try {
+                await saveBandwagonSettings();
+                const res = await fetch('/api/bandwagon/restart', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || res.statusText);
+            } catch (e) {
+                status.textContent = `重啟失敗：${e.message}`;
+                btn.disabled = false;
+                return;
+            }
+            status.textContent = '已送出重啟指令，等待 VPS 恢復...';
+            const started = Date.now();
+            await new Promise(r => setTimeout(r, 15000));
+            while (Date.now() - started < 5 * 60 * 1000) {
+                try {
+                    const res = await fetch(`/api/ping?t=${Date.now()}`, { cache: 'no-store' });
+                    if (res.ok) {
+                        status.textContent = `VPS 已恢復（約 ${Math.round((Date.now() - started) / 1000)} 秒）。`;
+                        btn.disabled = false;
+                        fetchSystem();
+                        return;
+                    }
+                } catch (e) { /* still rebooting */ }
+                await new Promise(r => setTimeout(r, 5000));
+            }
+            status.textContent = '5 分鐘內未恢復，請到 KiwiVM 控制台查看狀態。';
+            btn.disabled = false;
         }
 
         function formatCoordinates(lat, lon) {
@@ -1233,6 +1293,7 @@
                 document.getElementById('client-access-type').innerText = data.client_ip_access_type || 'Unknown';
                 document.getElementById('ip-location').innerText = data.ip_location || 'Unknown';
                 document.getElementById('ip-type').innerText = data.ip_type || '未知';
+                renderBandwagonPlan(data.bandwagon);
                 document.getElementById('ip-isp').innerText = data.ip_isp || 'Unknown';
                 document.getElementById('ip-as').innerText = data.ip_as || 'Unknown';
                 document.getElementById('sys-uptime').innerText = data.uptime.split('.')[0];
@@ -1476,6 +1537,7 @@
         document.getElementById('ddns-sync').addEventListener('click', syncDdnsNow);
         document.getElementById('migrate-load').addEventListener('click', loadBandwagonLocations);
         document.getElementById('migrate-start').addEventListener('click', startBandwagonMigration);
+        document.getElementById('vps-restart').addEventListener('click', restartVps);
         document.getElementById('traffic-quota-save').addEventListener('click', saveTrafficQuotaSettings);
         document.getElementById('logout-panel').addEventListener('click', logoutPanel);
         document.getElementById('traffic-reset').addEventListener('click', resetTraffic);

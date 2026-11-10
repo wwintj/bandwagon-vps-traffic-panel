@@ -95,9 +95,11 @@ def test_proxy_headers_only_trusted_from_localhost(m):
 def test_short_password_allowed_in_panel(m, client, post_headers, monkeypatch):
     monkeypatch.setattr(m, "update_env_values", lambda updates: None)
     monkeypatch.setattr(m, "AUTH_PASSWORD", m.AUTH_PASSWORD)
+    monkeypatch.setattr(m, "AUTH_PASSWORD_HASH", m.AUTH_PASSWORD_HASH)
     payload = {"auth_username": "admin", "auth_password": "abc", "panel_title": "t", "panel_subtitle": "s"}
     assert client.post("/api/settings", headers=post_headers, json=payload).status_code == 200
-    assert m.AUTH_PASSWORD == "abc"
+    assert m.passwords.verify_password("abc", m.AUTH_PASSWORD_HASH)
+    m.VERIFIED_CREDENTIALS.clear()
 
 
 def test_password_with_unsafe_characters_rejected(client, post_headers):

@@ -693,12 +693,16 @@ source venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
+# Store only a salted hash of the password. It goes in on stdin so it never shows in `ps`.
+AUTH_PASSWORD_HASH=$(printf '%s' "$AUTH_PASSWORD" | "$INSTALL_DIR/venv/bin/python" -c 'import sys; from app.passwords import hash_password; print(hash_password(sys.stdin.read()))')
+[ -n "$AUTH_PASSWORD_HASH" ] || fail "Could not hash the panel password"
+
 info "Generating .env file..."
 cat > .env <<EOF
 HOST=$HOST
 PORT=$PORT
 AUTH_USERNAME=$AUTH_USERNAME
-AUTH_PASSWORD=$AUTH_PASSWORD
+AUTH_PASSWORD_HASH=$AUTH_PASSWORD_HASH
 PANEL_TITLE="VPS 監控流量面板"
 PANEL_SUBTITLE="Tim哥在三更半夜改好的"
 TELEGRAM_ENABLED=0
