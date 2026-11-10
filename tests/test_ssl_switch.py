@@ -97,3 +97,27 @@ def test_helper_not_installed(m, certctl, client, post_headers, monkeypatch):
 def test_scan_requires_https(m, certctl, client, post_headers, monkeypatch):
     monkeypatch.setattr(m, "HTTPS_MODE", "none")
     assert client.post("/api/ssl/scan", headers=post_headers).status_code == 400
+
+
+def test_direct_mode_apply_returns_before_the_restart(m, certctl, client, post_headers, auth, monkeypatch):
+    """The helper restarts the panel in direct-HTTPS mode, so the request must not stay open."""
+    monkeypatch.setattr(m, "HTTPS_MODE", "uvicorn")
+
+    def respond(request):
+        return {"ok": True, "applied": CANDIDATE}
+
+    stop = fake_helper(certctl, respond)
+    try:
+        r = client.post("/api/ssl/apply", headers=post_headers, json={"candidate": "a" * 16})
+        assert r.status_code == 200 and r.json()["pending"] is True
+        request_id = r.json()["request_id"]
+        for _ in range(40):
+            result = client.get(f"/api/ssl/result?id={request_id}", headers=auth).json()
+            if result.get("state") == "done":
+                break
+            time.sleep(0.05)
+    finally:
+        stop.set()
+    assert result["ok"] is True and result["applied"]["id"] == "a" * 16
+    assert client.get("/api/ssl/result?id=" + "b" * 16, headers=auth).json()["state"] == "unknown"
+    assert client.get("/api/ssl/result?id=../../x", headers=auth).status_code == 400

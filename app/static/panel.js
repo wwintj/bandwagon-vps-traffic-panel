@@ -296,21 +296,37 @@ async function sslApply() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ candidate: c.id })
         });
-        const data = await res.json();
+        let data = await res.json();
         if (!res.ok) throw new Error(data.detail || res.statusText);
-        renderSslStatus(Object.assign({ ssl_expiry_notify: document.getElementById('ssl-expiry-notify').checked }, data.ssl));
+        if (data.pending) {
+            // Direct HTTPS mode: the helper restarts the panel. Ask for the outcome once it is back.
+            status.textContent = '面板正在重新啟動以套用新證書...';
+            data = await waitForSslResult(data.request_id);
+            if (!data.ok) throw new Error(data.error || '切換失敗');
+            await fetchSslStatus(true);
+        } else {
+            renderSslStatus(Object.assign({ ssl_expiry_notify: document.getElementById('ssl-expiry-notify').checked }, data.ssl));
+        }
         status.textContent = `已切換為 ${c.subject}，並確認面板正在使用新證書。`;
         renderSslCandidates([], '');
     } catch (e) {
-        if (directMode && e instanceof TypeError) {
-            // Direct HTTPS mode restarts the panel itself; check again once it is back.
-            status.textContent = '面板正在重新啟動，稍後自動重新檢查...';
-            setTimeout(() => fetchSslStatus(true).then(() => { status.textContent = '已重新檢查，請確認上方證書資訊。'; }), 8000);
-        } else {
-            status.textContent = `切換失敗：${e.message}`;
-            applyBtn.disabled = false;
-        }
+        status.textContent = `切換失敗：${e.message}`;
+        applyBtn.disabled = false;
     }
+}
+
+async function waitForSslResult(requestId) {
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+            const res = await fetch(`/api/ssl/result?id=${encodeURIComponent(requestId)}`, { cache: 'no-store' });
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (data.state === 'done') return data;
+        } catch (e) { /* panel restarting */ }
+    }
+    throw new Error('等待逾時，請重新檢查證書狀態');
 }
 
 function updateSslSwitchVisibility(data) {

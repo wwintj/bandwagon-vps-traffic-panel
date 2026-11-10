@@ -751,9 +751,9 @@ fi
 
 info "Configuring systemd service..."
 if [ "$HTTPS_MODE" = "uvicorn" ]; then
-    EXEC_START="$INSTALL_DIR/venv/bin/uvicorn app.main:app --host \$HOST --port \$PORT --ssl-certfile \$SSL_CERTFILE --ssl-keyfile \$SSL_KEYFILE"
+    EXEC_START="$INSTALL_DIR/venv/bin/uvicorn app.main:app --host \$HOST --port \$PORT --timeout-graceful-shutdown 10 --ssl-certfile \$SSL_CERTFILE --ssl-keyfile \$SSL_KEYFILE"
 else
-    EXEC_START="$INSTALL_DIR/venv/bin/uvicorn app.main:app --host \$HOST --port \$PORT"
+    EXEC_START="$INSTALL_DIR/venv/bin/uvicorn app.main:app --host \$HOST --port \$PORT --timeout-graceful-shutdown 10"
 fi
 
 cat > "$SERVICE_FILE" <<EOF

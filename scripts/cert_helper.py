@@ -409,10 +409,17 @@ def apply_uvicorn(candidate, env, install_dir):
         if key not in seen:
             lines.append(f"{key}={value}")
     write_atomic(env_path, "\n".join(lines) + "\n", 0o600)
-    run(["systemctl", "restart", SERVICE_NAME])
-    if not wait_for_fingerprint(int(env.get("PORT") or 8088), None, candidate["fingerprint"], 30):
+
+    def restart():
+        try:
+            run(["systemctl", "restart", SERVICE_NAME], timeout=90)
+        except subprocess.TimeoutExpired:
+            pass  # still verified (and rolled back if needed) below
+
+    restart()
+    if not wait_for_fingerprint(int(env.get("PORT") or 8088), None, candidate["fingerprint"], 45):
         write_atomic(env_path, original, 0o600)
-        run(["systemctl", "restart", SERVICE_NAME])
+        restart()
         raise ValueError("套用後驗證失敗：面板沒有送出新證書，已自動還原為原本的證書")
 
 

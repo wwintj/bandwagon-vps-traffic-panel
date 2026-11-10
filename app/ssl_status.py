@@ -94,8 +94,19 @@ def _read_certctl_result():
         return None
 
 
-async def certctl_request(action, **fields):
+def read_certctl_result(request_id):
+    result = _read_certctl_result()
+    if not result or result.get("id") != request_id:
+        return {"id": request_id, "state": "unknown"}
+    return result
+
+
+async def certctl_request(action, wait_until="done", **fields):
     """Hand a request to the root certificate helper and wait for its answer.
+
+    wait_until="running" returns as soon as the helper has picked the request up. Direct-HTTPS
+    switching needs that: the helper restarts this very process, and an open request would hold
+    up the shutdown (and with it the switch) until it timed out.
 
     The helper only accepts a candidate id from its own fresh scan, so nothing sent here can make
     root read or write an arbitrary path."""
@@ -115,7 +126,7 @@ async def certctl_request(action, **fields):
         result = _read_certctl_result()
         if result and result.get("id") == request_id:
             picked_up = True
-            if result.get("state") == "done":
+            if result.get("state") == "done" or wait_until == "running":
                 return result
         if not picked_up and time.time() - started > CERTCTL_PICKUP_SECONDS:
             raise HTTPException(status_code=503, detail="證書切換服務沒有回應，請在 VPS 執行 vps-panel update 後再試")

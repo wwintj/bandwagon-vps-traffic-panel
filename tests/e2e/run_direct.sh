@@ -7,6 +7,13 @@ set -euo pipefail
 
 # shellcheck source=tests/e2e/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+die() {
+    echo "FAIL: $*" >&2
+    grep -E '^(HTTPS_MODE|SSL_)' /opt/vps-traffic-panel/.env >&2 || true
+    journalctl -u vps-traffic-panel-certctl -u vps-traffic-panel-cert -n 30 --no-pager || true
+    journalctl -u vps-traffic-panel -n 20 --no-pager | grep -v "Invalid HTTP request" || true
+    exit 1
+}
 
 PORT=8088
 FIRST=/root/cert/first
@@ -48,13 +55,22 @@ candidate=$(api /api/ssl/scan -X POST | python3 -c '
 import json, sys
 print([c["id"] for c in json.load(sys.stdin)["candidates"] if "/root/cert/second/" in c["cert"] and c["usable"]][0])
 ') || die "second certificate not offered"
-# The helper restarts the panel while this request waits, so the connection may drop: verify by serial.
-api /api/ssl/apply -X POST -d "{\"candidate\": \"$candidate\"}" -o /tmp/apply-direct.json -m 90 || true
-for _ in $(seq 1 40); do
-    [ "$(served_serial $PORT)" = "$expected" ] && break
-    sleep 1
+# Direct mode answers right away with a request id (the helper is about to restart the panel),
+# then the outcome is read back once the panel is up again.
+request_id=$(api /api/ssl/apply -X POST -d "{\"candidate\": \"$candidate\"}" -m 30 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("pending"), d
+print(d["request_id"])
+') || die "apply did not return a pending request"
+state=""
+for _ in $(seq 1 60); do
+    state=$(api "/api/ssl/result?id=$request_id" -m 5 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("ok" if d.get("state")=="done" and d.get("ok") else d.get("state","?") if d.get("state")!="done" else "error: "+d.get("error",""))' 2>/dev/null || echo restarting)
+    case "$state" in ok|error*) break ;; esac
+    sleep 2
 done
-[ "$(served_serial $PORT)" = "$expected" ] || die "panel does not serve the new certificate: $(cat /tmp/apply-direct.json 2>/dev/null)"
+[ "$state" = ok ] || die "switch did not finish: $state"
+[ "$(served_serial $PORT)" = "$expected" ] || die "panel does not serve the new certificate"
 grep -q "^SSL_CERTFILE=$SECOND/fullchain.pem$" /opt/vps-traffic-panel/.env || die ".env not updated"
 check "switched; the restarted panel serves the new certificate"
 

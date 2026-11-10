@@ -30,6 +30,11 @@ async def api_ssl_apply(payload: dict, username: str = Depends(auth.verify_auth)
     candidate = str(payload.get("candidate", ""))
     if not re.fullmatch(r"[0-9a-f]{16}", candidate):
         raise HTTPException(status_code=400, detail="Invalid candidate")
+    if config.HTTPS_MODE == "uvicorn":
+        # The helper restarts the panel to serve the new certificate; answer now with the request id
+        # and let the browser ask /api/ssl/result once the panel is back.
+        started = await ssl_status.certctl_request("apply", wait_until="running", candidate=candidate)
+        return {"ok": True, "pending": True, "request_id": started["id"]}
     result = await ssl_status.certctl_request("apply", candidate=candidate)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or "切換失敗")
@@ -40,6 +45,16 @@ async def api_ssl_apply(payload: dict, username: str = Depends(auth.verify_auth)
         config.SSL_CERTFILE = applied["cert"]
     ssl_status.SSL_STATUS_CACHE["data"] = None
     return {"ok": True, "applied": applied, "ssl": await util.run_blocking(ssl_status.get_ssl_status, True)}
+
+
+@router.get("/api/ssl/result")
+async def api_ssl_result(id: str = "", username: str = Depends(auth.verify_auth)):
+    if not re.fullmatch(r"[0-9a-f]{16}", id):
+        raise HTTPException(status_code=400, detail="Invalid request id")
+    result = ssl_status.read_certctl_result(id)
+    if result.get("state") == "done":
+        ssl_status.SSL_STATUS_CACHE["data"] = None
+    return result
 
 
 @router.post("/api/ssl-settings")
