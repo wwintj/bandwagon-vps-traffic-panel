@@ -46,6 +46,18 @@ CLOUDFLARE_ZONE_ID = os.getenv("CLOUDFLARE_ZONE_ID", "")
 CLOUDFLARE_RECORD_NAME = os.getenv("CLOUDFLARE_RECORD_NAME", "")
 CLOUDFLARE_PROXIED = os.getenv("CLOUDFLARE_PROXIED", "0")
 try:
+    CLOUDFLARE_DDNS_INTERVAL = int(os.getenv("CLOUDFLARE_DDNS_INTERVAL", "5"))
+except ValueError:
+    CLOUDFLARE_DDNS_INTERVAL = 5
+CLOUDFLARE_DDNS_INTERVAL = max(1, min(60, CLOUDFLARE_DDNS_INTERVAL))
+try:
+    CLOUDFLARE_TTL = int(os.getenv("CLOUDFLARE_TTL", "1"))
+except ValueError:
+    CLOUDFLARE_TTL = 1
+# Cloudflare accepts 1 (automatic) or 60-86400 seconds.
+CLOUDFLARE_TTL = 1 if CLOUDFLARE_TTL < 60 else min(86400, CLOUDFLARE_TTL)
+CLOUDFLARE_DDNS_NOTIFY = os.getenv("CLOUDFLARE_DDNS_NOTIFY", "1")
+try:
     MONTH_RESET_DAY = int(os.getenv("MONTH_RESET_DAY", "1"))
 except ValueError:
     MONTH_RESET_DAY = 1

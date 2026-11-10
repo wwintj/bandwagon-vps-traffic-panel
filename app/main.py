@@ -10,6 +10,7 @@ import re
 import socket
 import urllib.request
 import urllib.parse
+import urllib.error
 import hashlib
 import ipaddress
 from collections import deque
@@ -24,7 +25,7 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
@@ -366,16 +367,31 @@ def classify_access_network(info):
         access_type = "寬帶"
     return f"{carrier}{access_type}" if carrier != "Unknown" else access_type
 
+# IPv4-only endpoints, tried in order until one answers with a valid address.
+PUBLIC_IP_SOURCES = (
+    "https://api.ipify.org",
+    "https://ipv4.icanhazip.com",
+    "https://v4.ident.me",
+    "https://checkip.amazonaws.com",
+)
+
+def fetch_public_ipv4():
+    for url in PUBLIC_IP_SOURCES:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "VPS-Traffic-Panel"})
+            with urllib.request.urlopen(req, timeout=4) as response:
+                candidate = response.read().decode("utf-8").strip()
+            return str(ipaddress.IPv4Address(candidate))
+        except Exception:
+            continue
+    return None
+
 def get_cached_public_ip_info(force=False):
     now = time.time()
     if not force and SYSTEM_INFO_CACHE["public_ip"] and now - SYSTEM_INFO_CACHE["updated_at"] < SYSTEM_INFO_CACHE_TTL:
         return SYSTEM_INFO_CACHE["public_ip"], SYSTEM_INFO_CACHE["ip_info"]
 
-    try:
-        public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf-8').strip()
-        ipaddress.ip_address(public_ip)
-    except Exception:
-        public_ip = "Unknown"
+    public_ip = fetch_public_ipv4() or "Unknown"
 
     ip_info = lookup_ip_info(public_ip) if public_ip != "Unknown" else {}
 
@@ -413,8 +429,16 @@ def request_json(url, method="GET", payload=None, headers=None, timeout=10):
         data = json.dumps(payload).encode("utf-8")
         request_headers = {"Content-Type": "application/json", **request_headers}
     req = urllib.request.Request(url, data=data, method=method, headers=request_headers)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        # APIs like Cloudflare explain the failure in a JSON body on 4xx; keep it.
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise ValueError(f"HTTP {exc.code}: {raw[:200]}") from exc
     return json.loads(raw) if raw else {}
 
 def get_traffic_summary(pending=None):
@@ -749,7 +773,7 @@ def build_migration_status():
     }
     if ip_changed and ddns["enabled"]:
         try:
-            sync_cloudflare_ddns()
+            sync_cloudflare_ddns(current_ip)
             ddns["synced"] = True
         except Exception as exc:
             ddns["error"] = str(exc)
@@ -794,57 +818,187 @@ def cloudflare_headers():
         "Accept": "application/json",
     }
 
-def sync_cloudflare_ddns():
-    if not CLOUDFLARE_API_TOKEN or not CLOUDFLARE_ZONE_ID or not CLOUDFLARE_RECORD_NAME:
-        raise ValueError("Cloudflare Token、Zone ID 或域名未填完整")
+CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+ZONE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+CLOUDFLARE_ZONE_CACHE = {}
+# Re-check the DNS record at least this often even if our IP did not change,
+# so a record edited by hand (or by another tool) is put back.
+DDNS_RECHECK_SECONDS = 6 * 3600
 
-    public_ip, _ = get_cached_public_ip_info()
+def cloudflare_error_text(response, fallback):
+    errors = response.get("errors") or []
+    parts = []
+    for err in errors:
+        if isinstance(err, dict):
+            parts.append(f"{err.get('code', '')} {err.get('message', '')}".strip())
+        else:
+            parts.append(str(err))
+    text = "；".join(p for p in parts if p) or fallback
+    codes = {err.get("code") for err in errors if isinstance(err, dict)}
+    if codes & {9109, 10000, 9103, 6003, 6111}:
+        text += "（請確認 API Token 正確，並具有該網域的 Zone.DNS:Edit 權限）"
+    return text
+
+def resolve_cloudflare_zone_id():
+    """CLOUDFLARE_ZONE_ID may hold a zone ID, a zone name (example.com), or be empty;
+    when empty the zone is found from the record name (www.example.com -> example.com)."""
+    zone = CLOUDFLARE_ZONE_ID.strip()
+    if ZONE_ID_PATTERN.match(zone.lower()):
+        return zone
+    record = CLOUDFLARE_RECORD_NAME.strip().rstrip(".").lower()
+    cache_key = (zone.lower(), record)
+    if cache_key in CLOUDFLARE_ZONE_CACHE:
+        return CLOUDFLARE_ZONE_CACHE[cache_key]
+
+    if zone:
+        candidates = [zone.rstrip(".").lower()]
+    else:
+        labels = record.split(".")
+        candidates = [".".join(labels[i:]) for i in range(len(labels) - 1)]
+    for name in candidates:
+        response = request_json(f"{CLOUDFLARE_API}/zones?{urllib.parse.urlencode({'name': name})}", headers=cloudflare_headers())
+        if not response.get("success"):
+            raise ValueError("Cloudflare 查詢 Zone 失敗：" + cloudflare_error_text(response, "未知錯誤"))
+        result = response.get("result") or []
+        if result:
+            CLOUDFLARE_ZONE_CACHE[cache_key] = result[0]["id"]
+            return result[0]["id"]
+    raise ValueError(f"在這個 Cloudflare Token 可存取的網域中找不到 {zone or record}")
+
+def sync_cloudflare_ddns(public_ip=None):
+    if not CLOUDFLARE_API_TOKEN or not CLOUDFLARE_RECORD_NAME:
+        raise ValueError("請填寫 Cloudflare API Token 與完整域名")
+
+    if not public_ip:
+        public_ip, _ = get_cached_public_ip_info(force=True)
     if not public_ip or public_ip == "Unknown":
         raise ValueError("無法取得目前 VPS 公網 IP")
 
-    base_url = f"https://api.cloudflare.com/client/v4/zones/{urllib.parse.quote(CLOUDFLARE_ZONE_ID)}/dns_records"
+    zone_id = resolve_cloudflare_zone_id()
+    base_url = f"{CLOUDFLARE_API}/zones/{urllib.parse.quote(zone_id)}/dns_records"
     query = urllib.parse.urlencode({"type": "A", "name": CLOUDFLARE_RECORD_NAME})
     records = request_json(f"{base_url}?{query}", headers=cloudflare_headers())
     if not records.get("success"):
-        raise ValueError(records.get("errors") or "Cloudflare 查詢 DNS 記錄失敗")
+        raise ValueError("Cloudflare 查詢 DNS 記錄失敗：" + cloudflare_error_text(records, "未知錯誤"))
 
+    proxied = CLOUDFLARE_PROXIED == "1"
+    # Proxied records always use automatic TTL on Cloudflare.
+    ttl = 1 if proxied else CLOUDFLARE_TTL
     body = {
         "type": "A",
         "name": CLOUDFLARE_RECORD_NAME,
         "content": public_ip,
-        "ttl": 1,
-        "proxied": CLOUDFLARE_PROXIED == "1",
+        "ttl": ttl,
+        "proxied": proxied,
     }
     existing = records.get("result") or []
-    if existing:
-        record_id = existing[0]["id"]
-        result = request_json(f"{base_url}/{record_id}", method="PATCH", payload=body, headers=cloudflare_headers())
-        action = "updated"
+    current = existing[0] if existing else None
+    previous_ip = current.get("content", "") if current else ""
+    if current and current.get("content") == public_ip and bool(current.get("proxied")) == proxied \
+            and (proxied or current.get("ttl") == ttl):
+        action = "unchanged"
     else:
-        result = request_json(base_url, method="POST", payload=body, headers=cloudflare_headers())
-        action = "created"
+        if current:
+            result = request_json(f"{base_url}/{current['id']}", method="PATCH", payload=body, headers=cloudflare_headers())
+            action = "updated"
+        else:
+            result = request_json(base_url, method="POST", payload=body, headers=cloudflare_headers())
+            action = "created"
+        if not result.get("success"):
+            raise ValueError("Cloudflare 更新 DNS 記錄失敗：" + cloudflare_error_text(result, "未知錯誤"))
 
-    if not result.get("success"):
-        raise ValueError(result.get("errors") or "Cloudflare 更新 DNS 記錄失敗")
     set_meta_value("cloudflare_ddns_last_ip", public_ip)
     set_meta_value("cloudflare_ddns_last_sync", timeutil.now().isoformat())
-    return {"ok": True, "action": action, "ip": public_ip, "record": CLOUDFLARE_RECORD_NAME}
+    return {
+        "ok": True,
+        "action": action,
+        "ip": public_ip,
+        "previous_ip": previous_ip,
+        "record": CLOUDFLARE_RECORD_NAME,
+    }
+
+def send_telegram_notice(text):
+    """Event notices (DDNS) only need a bot token and chat id; the daily-report switch is separate."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        send_telegram_message(text)
+        return True
+    except Exception:
+        return False
+
+def ddns_notice(title, lines):
+    if CLOUDFLARE_DDNS_NOTIFY != "1":
+        return False
+    return send_telegram_notice(migration_telegram_message(title, lines))
+
+def _ddns_sync_is_stale():
+    last_sync = get_meta_value("cloudflare_ddns_last_sync", "")
+    if not last_sync:
+        return True
+    try:
+        age = (timeutil.now() - datetime.fromisoformat(last_sync)).total_seconds()
+    except ValueError:
+        return True
+    return age > DDNS_RECHECK_SECONDS
+
+def ddns_check_once():
+    """One DDNS pass: refresh the public IP, sync Cloudflare when needed, notify on change or failure."""
+    set_meta_value("cloudflare_ddns_last_check", timeutil.now().isoformat())
+    public_ip, _ = get_cached_public_ip_info(force=True)
+    last_ip = get_meta_value("cloudflare_ddns_last_ip", "")
+    last_error = get_meta_value("cloudflare_ddns_last_error", "")
+
+    if public_ip != "Unknown" and public_ip == last_ip and not last_error and not _ddns_sync_is_stale():
+        return {"ok": True, "action": "skipped", "ip": public_ip}
+
+    try:
+        if public_ip == "Unknown":
+            raise ValueError("無法從任何來源取得 VPS 公網 IPv4")
+        result = sync_cloudflare_ddns(public_ip)
+    except Exception as exc:
+        error = str(exc)
+        set_meta_value("cloudflare_ddns_last_error", error)
+        # Notify once per distinct error, not on every retry.
+        if error != last_error:
+            ddns_notice("DDNS 更新失敗", [
+                f"域名：<code>{escape_html(CLOUDFLARE_RECORD_NAME)}</code>",
+                f"IP：<code>{escape_html(public_ip)}</code>",
+                f"錯誤：{escape_html(error)}",
+                f"面板會每 {CLOUDFLARE_DDNS_INTERVAL} 分鐘自動重試。",
+            ])
+        logger.warning("Cloudflare DDNS update failed: %s", error)
+        return {"ok": False, "error": error}
+
+    if last_error:
+        set_meta_value("cloudflare_ddns_last_error", "")
+    # During a Bandwagon migration the migration flow sends its own messages.
+    migrating = get_meta_value("migration_active", "0") == "1"
+    if result["action"] in ("updated", "created") and not migrating:
+        ddns_notice("DDNS 已更新", [
+            f"域名：<code>{escape_html(CLOUDFLARE_RECORD_NAME)}</code>",
+            f"舊 IP：<code>{escape_html(result.get('previous_ip') or last_ip or '無')}</code>",
+            f"新 IP：<code>{escape_html(public_ip)}</code>",
+        ])
+    elif last_error and not migrating:
+        ddns_notice("DDNS 已恢復正常", [
+            f"域名：<code>{escape_html(CLOUDFLARE_RECORD_NAME)}</code>",
+            f"IP：<code>{escape_html(public_ip)}</code>",
+        ])
+    return result
 
 async def ddns_background_updater():
+    # First check shortly after start (e.g. right after a reboot or migration), then every interval.
+    await asyncio.sleep(20)
     while True:
-        try:
-            await asyncio.sleep(600)
-            if CLOUDFLARE_DDNS_ENABLED != "1":
-                continue
-            public_ip, _ = await run_blocking(get_cached_public_ip_info)
-            if public_ip == "Unknown" or public_ip == get_meta_value("cloudflare_ddns_last_ip", ""):
-                continue
-            await run_blocking(sync_cloudflare_ddns)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("Cloudflare DDNS update failed: %s", exc)
-            await asyncio.sleep(600)
+        if CLOUDFLARE_DDNS_ENABLED == "1":
+            try:
+                await run_blocking(ddns_check_once)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Cloudflare DDNS check failed: %s", exc)
+        await asyncio.sleep(CLOUDFLARE_DDNS_INTERVAL * 60)
 
 def build_telegram_message(pending=None):
     summary = get_traffic_summary(pending)
@@ -1081,34 +1235,57 @@ async def api_get_ddns_settings(username: str = Depends(verify_auth)):
         "cloudflare_record_name": CLOUDFLARE_RECORD_NAME,
         "cloudflare_api_token": mask_secret(CLOUDFLARE_API_TOKEN),
         "cloudflare_proxied": CLOUDFLARE_PROXIED == "1",
+        "cloudflare_ddns_interval": CLOUDFLARE_DDNS_INTERVAL,
+        "cloudflare_ttl": CLOUDFLARE_TTL,
+        "cloudflare_ddns_notify": CLOUDFLARE_DDNS_NOTIFY == "1",
+        "telegram_ready": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "last_ip": get_meta_value("cloudflare_ddns_last_ip", ""),
         "last_sync": format_meta_time(get_meta_value("cloudflare_ddns_last_sync", "")),
+        "last_check": format_meta_time(get_meta_value("cloudflare_ddns_last_check", "")),
+        "last_error": get_meta_value("cloudflare_ddns_last_error", ""),
     }
 
 @app.post("/api/ddns-settings")
 async def api_update_ddns_settings(payload: dict, username: str = Depends(verify_auth)):
     global CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED
+    global CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY
 
     CLOUDFLARE_DDNS_ENABLED = "1" if payload.get("cloudflare_ddns_enabled") else "0"
     CLOUDFLARE_API_TOKEN = resolve_secret(payload.get("cloudflare_api_token", ""), CLOUDFLARE_API_TOKEN)
     CLOUDFLARE_ZONE_ID = str(payload.get("cloudflare_zone_id", "")).strip()
     CLOUDFLARE_RECORD_NAME = str(payload.get("cloudflare_record_name", "")).strip()
     CLOUDFLARE_PROXIED = "1" if payload.get("cloudflare_proxied") else "0"
+    try:
+        CLOUDFLARE_DDNS_INTERVAL = max(1, min(60, int(payload.get("cloudflare_ddns_interval", CLOUDFLARE_DDNS_INTERVAL))))
+        ttl = int(payload.get("cloudflare_ttl", CLOUDFLARE_TTL))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid check interval or TTL")
+    CLOUDFLARE_TTL = 1 if ttl < 60 else min(86400, ttl)
+    CLOUDFLARE_DDNS_NOTIFY = "1" if payload.get("cloudflare_ddns_notify", True) else "0"
+    CLOUDFLARE_ZONE_CACHE.clear()
+    # Settings changed: make the next check talk to Cloudflare instead of trusting the last result.
+    set_meta_value("cloudflare_ddns_last_sync", "")
     update_env_values({
         "CLOUDFLARE_DDNS_ENABLED": CLOUDFLARE_DDNS_ENABLED,
         "CLOUDFLARE_API_TOKEN": CLOUDFLARE_API_TOKEN,
         "CLOUDFLARE_ZONE_ID": CLOUDFLARE_ZONE_ID,
         "CLOUDFLARE_RECORD_NAME": CLOUDFLARE_RECORD_NAME,
         "CLOUDFLARE_PROXIED": CLOUDFLARE_PROXIED,
+        "CLOUDFLARE_DDNS_INTERVAL": CLOUDFLARE_DDNS_INTERVAL,
+        "CLOUDFLARE_TTL": CLOUDFLARE_TTL,
+        "CLOUDFLARE_DDNS_NOTIFY": CLOUDFLARE_DDNS_NOTIFY,
     })
     return {"ok": True}
 
 @app.post("/api/ddns-sync")
 async def api_ddns_sync(username: str = Depends(verify_auth)):
     try:
-        return await run_blocking(sync_cloudflare_ddns)
+        result = await run_blocking(sync_cloudflare_ddns)
     except Exception as exc:
+        set_meta_value("cloudflare_ddns_last_error", str(exc))
         raise HTTPException(status_code=400, detail=str(exc))
+    set_meta_value("cloudflare_ddns_last_error", "")
+    return result
 
 @app.get("/api/bandwagon-settings")
 async def api_get_bandwagon_settings(username: str = Depends(verify_auth)):

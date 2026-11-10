@@ -112,6 +112,7 @@ main() {
     local new_version
     new_version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$INSTALL_DIR/app/__init__.py" 2>/dev/null || true)
     echo -e "${GREEN}Update completed: v${old_version:-unknown} -> v${new_version:-unknown}${RESET}"
+    bash "$INSTALL_DIR/scripts/legacy-check.sh"
     echo -e "Install directory : $INSTALL_DIR"
     echo -e "Backups           : $INSTALL_DIR/backups (newest $KEEP_BACKUPS kept)"
     echo -e "Service status    : systemctl status $SERVICE_NAME"

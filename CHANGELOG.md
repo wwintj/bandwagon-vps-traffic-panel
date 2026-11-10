@@ -1,5 +1,22 @@
 # 更新日誌
 
+## v1.2.0 — 2026-11-10
+
+把獨立的 [cloudflare-ddns-banwagon-vps](https://github.com/wwintj/cloudflare-ddns-banwagon-vps) 腳本的優點併入面板內建的 Cloudflare DDNS，之後只需要面板一個就夠了。
+
+### 新增
+- **不用再找 Zone ID**：只填 API Token 與完整域名即可，面板自動偵測所屬 Zone；也可以填主網域或 Zone ID。
+- **檢查更快**：面板啟動 20 秒後就檢查一次，之後預設每 5 分鐘（可選 1–60 分鐘）。以前最壞要約 20 分鐘才更新。
+- **多個 IP 來源**：ipify、icanhazip、ident.me、AWS 依序嘗試，只接受 IPv4。
+- **Telegram 通知**：IP 變更、更新失敗、恢復正常時通知；同一個錯誤只通知一次，切換機房期間不重複通知。不需要開啟每日推送。
+- **TTL 可設定**：自動或 1 分鐘到 1 小時（開啟代理時固定自動）。
+- **每 6 小時核對一次**，DNS 記錄被手動改掉也會被改回來；記錄本來就正確時不會重複寫入。
+- DDNS 視窗顯示 DNS 記錄 IP、上次同步、上次檢查與最近錯誤。
+- 安裝與升級時偵測舊的 `cf-ddns.timer`，提示用 `scripts/legacy-check.sh remove` 移除，避免兩個程式同時更新同一筆記錄。
+
+### 修正
+- Cloudflare 回傳 4xx 時，以前只看到「HTTP Error 403」；現在會顯示 Cloudflare 的錯誤代碼與說明，權限問題會提示需要 `Zone.DNS:Edit`。
+
 ## v1.1.3 — 2026-11-10
 
 - 「即時速度」卡片的月流量改為兩行：上面是「月流量 百分比」與「已用 / 配額」，下面是佔滿整行的進度條，用量一目了然。

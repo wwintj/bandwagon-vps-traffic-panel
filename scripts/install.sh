@@ -788,6 +788,8 @@ else
     open_firewall_port "$PORT"
 fi
 
+bash "$INSTALL_DIR/scripts/legacy-check.sh"
+
 ok "===================================="
 ok "Installation Successful!"
 echo -e "Access your panel at : $ACCESS_URL"

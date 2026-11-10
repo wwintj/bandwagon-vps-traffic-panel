@@ -69,7 +69,7 @@ URL="https://$DOMAIN:8443"
 RESOLVE=(--resolve "$DOMAIN:8443:127.0.0.1")
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" "$URL/api/ping")
 [ "$code" = 200 ] || die "HTTPS ping via Nginx returned $code"
-curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.1.3"' || die "version not served"
+curl -sk "${RESOLVE[@]}" -u "admin:$PASS" "$URL/api/ping" | grep -q '"version":"1.2.0"' || die "version not served"
 check "HTTPS through Nginx works"
 code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -u "admin:$PASS" -X POST "$URL/api/telegram-test")
 [ "$code" = 403 ] || die "POST without CSRF header returned $code"
@@ -107,8 +107,17 @@ grep -q "https://$DOMAIN:8443" /tmp/status.txt || die "status shows wrong URL"
 check "status shows URL"
 grep -q "PathChanged=$CERT_DIR$" /etc/systemd/system/vps-traffic-panel-cert.path && check "symlinked cert dir is watched" || die "symlinked cert dir not watched"
 
-step "Update"
-vps-panel update </dev/null
+step "Update (with the old standalone cf-ddns script present)"
+printf '[Unit]\nDescription=fake legacy cf-ddns\n[Timer]\nOnUnitActiveSec=5min\n[Install]\nWantedBy=timers.target\n' > /etc/systemd/system/cf-ddns.timer
+printf '[Service]\nType=oneshot\nExecStart=/bin/true\n' > /etc/systemd/system/cf-ddns.service
+systemctl daemon-reload && systemctl enable --now cf-ddns.timer >/dev/null 2>&1
+vps-panel update </dev/null | tee /tmp/update.txt
+grep -q "standalone Cloudflare DDNS script" /tmp/update.txt || die "update did not warn about the old cf-ddns script"
+check "update warns about the old cf-ddns script"
+bash /opt/vps-traffic-panel/scripts/legacy-check.sh remove
+[ ! -e /etc/systemd/system/cf-ddns.timer ] || die "legacy-check remove left cf-ddns.timer"
+systemctl is-active --quiet cf-ddns.timer && die "cf-ddns.timer still active"
+check "legacy-check remove cleaned up cf-ddns"
 systemctl is-active --quiet vps-traffic-panel || die "service down after update"
 ls /opt/vps-traffic-panel/backups/data.db.*.bak >/dev/null || die "no database backup"
 [ "$(stat -c %U /opt/vps-traffic-panel/.env)" = "vps-traffic-panel" ] || die ".env owner changed by update"

@@ -294,16 +294,44 @@
                 <label class="block text-xs text-slate-400 uppercase">Cloudflare API Token
                     <input id="ddns-token" type="password" class="form-input" autocomplete="off">
                 </label>
-                <label class="block text-xs text-slate-400 uppercase">Zone ID
-                    <input id="ddns-zone-id" class="form-input" autocomplete="off">
-                </label>
                 <label class="block text-xs text-slate-400 uppercase">完整域名
-                    <input id="ddns-record-name" class="form-input" placeholder="www.tim.com" autocomplete="off">
+                    <input id="ddns-record-name" class="form-input" placeholder="vps.example.com" autocomplete="off">
                 </label>
+                <label class="block text-xs text-slate-400 uppercase">主網域或 Zone ID（可留空）
+                    <input id="ddns-zone-id" class="form-input" placeholder="留空自動偵測，例如 example.com" autocomplete="off">
+                </label>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="block text-xs text-slate-400 uppercase">檢查間隔
+                        <select id="ddns-interval" class="form-input">
+                            <option value="1">每 1 分鐘</option>
+                            <option value="2">每 2 分鐘</option>
+                            <option value="5">每 5 分鐘</option>
+                            <option value="10">每 10 分鐘</option>
+                            <option value="30">每 30 分鐘</option>
+                            <option value="60">每 60 分鐘</option>
+                        </select>
+                    </label>
+                    <label class="block text-xs text-slate-400 uppercase">TTL
+                        <select id="ddns-ttl" class="form-input">
+                            <option value="1">自動</option>
+                            <option value="60">1 分鐘</option>
+                            <option value="120">2 分鐘</option>
+                            <option value="300">5 分鐘</option>
+                            <option value="600">10 分鐘</option>
+                            <option value="3600">1 小時</option>
+                        </select>
+                    </label>
+                </div>
                 <label class="flex items-center gap-2 text-sm text-slate-300">
                     <input id="ddns-proxied" type="checkbox" class="h-4 w-4 accent-orange-400">
-                    啟用 Cloudflare 代理雲朵
+                    啟用 Cloudflare 代理雲朵（開啟時 TTL 固定為自動）
                 </label>
+                <label class="flex items-center gap-2 text-sm text-slate-300">
+                    <input id="ddns-notify" type="checkbox" class="h-4 w-4 accent-sky-400">
+                    IP 變更或更新失敗時發 Telegram 通知
+                </label>
+                <p class="text-[11px] text-slate-500 -mt-2" id="ddns-notify-hint"></p>
+                <div class="rounded border border-slate-700 bg-slate-900/60 p-3 text-[11px] font-mono text-slate-400 space-y-1" id="ddns-state"></div>
                 <div class="grid grid-cols-2 gap-3">
                     <button id="ddns-save" class="w-full rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition">保存設定</button>
                     <button id="ddns-sync" class="w-full rounded border border-emerald-500/60 hover:border-emerald-300 text-emerald-200 font-bold text-sm py-2.5 transition">立即同步</button>
@@ -632,8 +660,15 @@
                 document.getElementById('ddns-zone-id').value = data.cloudflare_zone_id || '';
                 document.getElementById('ddns-record-name').value = data.cloudflare_record_name || '';
                 document.getElementById('ddns-proxied').checked = Boolean(data.cloudflare_proxied);
-                const status = document.getElementById('ddns-status');
-                if (data.last_ip) status.innerText = `上次同步 ${data.last_ip}${data.last_sync ? ` / ${data.last_sync}` : ''}`;
+                document.getElementById('ddns-interval').value = String(data.cloudflare_ddns_interval ?? 5);
+                document.getElementById('ddns-ttl').value = String(data.cloudflare_ttl ?? 1);
+                if (!document.getElementById('ddns-ttl').value) document.getElementById('ddns-ttl').value = '1';
+                document.getElementById('ddns-notify').checked = data.cloudflare_ddns_notify !== false;
+                document.getElementById('ddns-notify-hint').innerText = data.telegram_ready
+                    ? '使用「TG 推送」裡的 Bot Token 與 Chat ID，不必開啟每日推送。'
+                    : '尚未設定 Telegram Bot Token / Chat ID，請先到「TG 推送」填寫。';
+                syncDdnsTtlState();
+                renderDdnsState(data);
             } catch (e) {
                 console.error("Error fetching /api/ddns-settings:", e);
             }
@@ -646,7 +681,10 @@
                 cloudflare_api_token: document.getElementById('ddns-token').value,
                 cloudflare_zone_id: document.getElementById('ddns-zone-id').value,
                 cloudflare_record_name: document.getElementById('ddns-record-name').value,
-                cloudflare_proxied: document.getElementById('ddns-proxied').checked
+                cloudflare_proxied: document.getElementById('ddns-proxied').checked,
+                cloudflare_ddns_interval: Number(document.getElementById('ddns-interval').value),
+                cloudflare_ttl: Number(document.getElementById('ddns-ttl').value),
+                cloudflare_ddns_notify: document.getElementById('ddns-notify').checked
             };
             try {
                 const res = await fetch('/api/ddns-settings', {
@@ -655,7 +693,7 @@
                     body: JSON.stringify(payload)
                 });
                 if (!res.ok) throw new Error(await res.text());
-                status.innerText = 'DDNS 設定已保存。啟用後每 10 分鐘檢查一次公網 IP。';
+                status.innerText = `DDNS 設定已保存。啟用後每 ${payload.cloudflare_ddns_interval} 分鐘檢查一次公網 IP。`;
                 return true;
             } catch (e) {
                 status.innerText = '保存失敗，請檢查 Cloudflare 資訊。';
@@ -663,6 +701,34 @@
                 return false;
             }
         }
+
+        function renderDdnsState(data) {
+            const rows = [
+                ['DNS 記錄 IP', data.last_ip || '尚未同步'],
+                ['上次同步', data.last_sync || '—'],
+                ['上次檢查', data.last_check || '—'],
+            ];
+            const box = document.getElementById('ddns-state');
+            box.replaceChildren(...rows.map(([label, value]) => {
+                const p = document.createElement('p');
+                p.textContent = `${label}：${value}`;
+                return p;
+            }));
+            if (data.last_error) {
+                const err = document.createElement('p');
+                err.className = 'text-red-300 whitespace-normal break-words';
+                err.textContent = `最近錯誤：${data.last_error}`;
+                box.appendChild(err);
+            }
+        }
+
+        function syncDdnsTtlState() {
+            const proxied = document.getElementById('ddns-proxied').checked;
+            const ttl = document.getElementById('ddns-ttl');
+            ttl.disabled = proxied;
+            ttl.classList.toggle('opacity-50', proxied);
+        }
+        document.getElementById('ddns-proxied').addEventListener('change', syncDdnsTtlState);
 
         async function syncDdnsNow() {
             const status = document.getElementById('ddns-status');
@@ -673,10 +739,14 @@
                 const res = await fetch('/api/ddns-sync', { method: 'POST' });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-                status.innerText = `已同步 ${data.record} -> ${data.ip}`;
+                status.innerText = data.action === 'unchanged'
+                    ? `${data.record} 已是 ${data.ip}，無需更新`
+                    : `已同步 ${data.record} -> ${data.ip}`;
+                fetchDdnsSettings();
             } catch (e) {
                 status.innerText = `同步失敗：${e.message}`;
                 console.error("Error syncing /api/ddns-sync:", e);
+                fetchDdnsSettings();
             }
         }
 

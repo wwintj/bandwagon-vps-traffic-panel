@@ -27,7 +27,7 @@
 
 **整合**
 - Telegram 每日流量推送（自訂時區與時間）
-- Cloudflare DDNS：公網 IP 變動時自動更新 A 記錄
+- Cloudflare DDNS：公網 IP 變動時自動更新 A 記錄（只需 Token 與域名，自動偵測 Zone，變更 / 失敗發 Telegram 通知）
 - Bandwagon（搬瓦工）：查詢官方配額、讀取可用機房、一鍵切換機房並追蹤新 IP 與 DNS 生效
 
 **管理**
@@ -159,7 +159,8 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 | `TELEGRAM_PUSH_HOUR` / `TELEGRAM_PUSH_MINUTE` | 每日推送時間 | `20:00` |
 | `TELEGRAM_TIMEZONE_OFFSET` / `TELEGRAM_TIMEZONE_LABEL` | **面板時區**（見下方） | `8` / `中國時間` |
 | `BANDWAGON_VEID` / `BANDWAGON_API_KEY` | 搬瓦工 API | 空 |
-| `CLOUDFLARE_DDNS_ENABLED` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID` / `CLOUDFLARE_RECORD_NAME` / `CLOUDFLARE_PROXIED` | Cloudflare DDNS | 關閉 |
+| `CLOUDFLARE_DDNS_ENABLED` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID` / `CLOUDFLARE_RECORD_NAME` / `CLOUDFLARE_PROXIED` | Cloudflare DDNS（`CLOUDFLARE_ZONE_ID` 可填 Zone ID、主網域或留空） | 關閉 |
+| `CLOUDFLARE_DDNS_INTERVAL` / `CLOUDFLARE_TTL` / `CLOUDFLARE_DDNS_NOTIFY` | DDNS 檢查間隔（分鐘）、TTL（`1` 為自動）、是否發 Telegram 通知 | `5` / `1` / `1` |
 | `SSL_ENABLED` / `SSL_CERTFILE` / `SSL_KEYFILE` / `HTTPS_MODE` / `HTTPS_PORT` / `PANEL_DOMAIN` | HTTPS 設定，由安裝腳本寫入 | |
 
 ### 時區
@@ -175,7 +176,31 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 
 ### Cloudflare DDNS
 
-需要一個有 `Zone.DNS:Edit` 權限的 API Token，以及域名所在的 Zone ID。啟用後每 10 分鐘檢查一次公網 IP，變動時更新 A 記錄（記錄不存在時會自動建立）。
+在面板點「DDNS」設定。只需要兩樣東西：
+
+1. **API Token**：到 Cloudflare「My Profile → API Tokens → Create Token」，用「Edit zone DNS」範本建立，Zone Resources 選你的網域。
+2. **完整域名**：例如 `vps.example.com`。
+
+「主網域或 Zone ID」可以留空，面板會從域名自動找到所屬的 Zone；也可以填 `example.com` 或 32 位的 Zone ID。
+
+運作方式：
+
+- 面板啟動 20 秒後檢查一次，之後依「檢查間隔」（預設每 5 分鐘，可選 1–60 分鐘）定時檢查
+- 公網 IPv4 依序向 ipify、icanhazip、ident.me、AWS 查詢，一個失效會自動換下一個
+- IP 變了才更新 A 記錄（記錄不存在時會自動建立）；另外每 6 小時核對一次，有人手動改過記錄也會被改回來
+- TTL 可選自動或 1 分鐘到 1 小時；開啟 Cloudflare 代理（小黃雲）時 TTL 固定為自動
+- IP 變更、更新失敗、失敗後恢復時發 Telegram 通知（同一個錯誤只通知一次）。使用「TG 推送」裡的 Bot Token 與 Chat ID，不需要開啟每日推送
+- 切換搬瓦工機房期間，DDNS 通知由切換流程統一發送，不會重複
+
+#### 從獨立的 cloudflare-ddns 腳本改用面板
+
+如果之前裝過 [cloudflare-ddns-banwagon-vps](https://github.com/wwintj/cloudflare-ddns-banwagon-vps)（`cf-ddns.timer`），兩個同時運行會重複更新同一筆記錄。在面板裡設定好 DDNS 並點「立即同步」確認成功後，移除舊腳本：
+
+```bash
+bash /opt/vps-traffic-panel/scripts/legacy-check.sh remove
+```
+
+安裝與升級時，如果偵測到舊腳本還在，也會提示這一步。
 
 ### Bandwagon（搬瓦工）
 
