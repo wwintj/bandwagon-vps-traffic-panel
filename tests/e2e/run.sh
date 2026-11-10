@@ -142,7 +142,7 @@ pick() {  # pick <path-fragment> <field>
     echo "$scan_json" | python3 -c '
 import json, sys
 c = [x for x in json.load(sys.stdin)["candidates"] if sys.argv[1] in x["cert"]][0]
-print(json.dumps(c[sys.argv[2]]) if not isinstance(c[sys.argv[2]], str) else c[sys.argv[2]])
+print(json.dumps(c[sys.argv[2]], ensure_ascii=False) if not isinstance(c[sys.argv[2]], str) else c[sys.argv[2]])
 ' "$1" "$2"
 }
 [ "$(pick /etc/letsencrypt/live/panel.test current)" = true ] || die "current certificate not marked: $scan_json"
