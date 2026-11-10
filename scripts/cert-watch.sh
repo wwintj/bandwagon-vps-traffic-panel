@@ -42,13 +42,27 @@ ExecStartPre=/bin/sleep 5
 ExecStart=/bin/bash $INSTALL_DIR/scripts/cert-watch.sh reload
 EOF
 
+    # A watch on a symlink follows it to the current target. certbot renews by repointing the
+    # live/ symlinks to new files and never touches the old target, so for symlinked paths also
+    # watch the containing directory, where the swap shows up as a create/rename.
+    local watch_lines="PathChanged=$cert"$'\n'"PathChanged=$key"
+    local dirs="" path dir
+    for path in "$cert" "$key"; do
+        if [ -L "$path" ]; then
+            dir=$(dirname "$path")
+            case " $dirs " in
+                *" $dir "*) ;;
+                *) dirs="$dirs $dir"; watch_lines="$watch_lines"$'\n'"PathChanged=$dir" ;;
+            esac
+        fi
+    done
+
     cat > "$PATH_UNIT" <<EOF
 [Unit]
 Description=Watch VPS Traffic Panel certificate for renewal
 
 [Path]
-PathChanged=$cert
-PathChanged=$key
+$watch_lines
 Unit=${SERVICE_NAME}-cert.service
 
 [Install]

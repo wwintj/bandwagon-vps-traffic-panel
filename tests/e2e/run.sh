@@ -105,6 +105,7 @@ step "Status"
 vps-panel status | tee /tmp/status.txt
 grep -q "https://$DOMAIN:8443" /tmp/status.txt || die "status shows wrong URL"
 check "status shows URL"
+grep -q "PathChanged=$CERT_DIR$" /etc/systemd/system/vps-traffic-panel-cert.path && check "symlinked cert dir is watched" || die "symlinked cert dir not watched"
 
 step "Update"
 vps-panel update </dev/null
