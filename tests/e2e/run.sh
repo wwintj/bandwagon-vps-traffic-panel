@@ -87,7 +87,8 @@ code=$(curl -sk "${RESOLVE[@]}" -c "$JAR" -o /dev/null -w '%{http_code}' -H 'X-P
     -d "{\"username\": \"admin\", \"password\": \"$PASS\"}" "$URL/api/login")
 [ "$code" = 200 ] || die "login failed: $code"
 grep -q "vps_panel_session" "$JAR" || die "no session cookie"
-grep -q "TRUE.*/.*TRUE" "$JAR" || die "session cookie not marked Secure over HTTPS"
+# Netscape cookie file: domain, include-subdomains, path, secure, expiry, name, value
+awk '$6 == "vps_panel_session" && $4 == "TRUE" {found=1} END {exit !found}' "$JAR" || { cat "$JAR"; die "session cookie not marked Secure over HTTPS"; }
 code=$(curl -sk "${RESOLVE[@]}" -b "$JAR" -o /dev/null -w '%{http_code}' "$URL/")
 [ "$code" = 200 ] || die "logged-in page returned $code"
 curl -sk "${RESOLVE[@]}" -b "$JAR" -c "$JAR" -o /dev/null -X POST -H 'X-Panel-Request: 1' "$URL/api/logout"
