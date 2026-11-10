@@ -1,5 +1,19 @@
 # 更新日誌
 
+## v1.9.0 — 2026-11-11
+
+這一版沒有新功能，重點是讓之後的修改更安全、更好維護。
+
+### 程式結構
+- 2100 多行的 `app/main.py` 拆成功能模組：`auth`、`traffic`、`bandwagon`、`ddns`、`telegram`、`ssl_status`、`system`、`net`、`envfile`、`util`，HTTP 端點放在 `app/routes/`。`main.py` 只剩 68 行，負責組裝。
+- 執行中的設定統一以 `config.NAME` 讀寫，不再到處用 `global` 修改模組變數。
+- 前端：1200 行內嵌 JavaScript 移到 `static/panel.js`；九個彈窗各自成為 `templates/partials/` 裡的檔案；`index.html` 從 1660 行縮到 172 行。
+- 拆分前後逐一比對：路由清單相同（36 個）、重新產生的 CSS 逐位元組相同、頁面各元素的計算樣式相同，原有 132 個測試全部通過。拆分時順帶修掉一個只在拆分後才會出現的變數遮蔽問題。
+
+### 測試
+- 端到端測試擴大到 Ubuntu 24.04、Ubuntu 22.04、Debian 12（容器內執行 systemd）。
+- 新增直連 HTTPS 模式（不填網域）的端到端測試：安裝、HTTPS 存取、從面板切換證書（面板會自行重啟）、證書續期、卸載。
+
 ## v1.8.0 — 2026-11-11
 
 ### 新增

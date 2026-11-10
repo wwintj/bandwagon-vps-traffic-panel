@@ -43,8 +43,42 @@ jobs:
       - run: shellcheck -S error panel.sh scripts/*.sh tests/e2e/*.sh
 
   e2e:
-    # Full install -> certificate renewal -> update -> uninstall on a real systemd host.
+    # Full install -> HTTPS -> certificate renewal / switch -> update -> uninstall on real systemd hosts.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-24.04 nginx
+            runner: ubuntu-24.04
+            script: run.sh
+          - name: ubuntu-22.04 nginx
+            runner: ubuntu-22.04
+            script: run.sh
+          - name: ubuntu-24.04 direct https
+            runner: ubuntu-24.04
+            script: run_direct.sh
+    name: e2e (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo bash tests/e2e/${{ matrix.script }}
+
+  e2e-debian:
+    # Debian 12 has no hosted runner: run the same script inside a container with systemd as PID 1.
+    name: e2e (debian 12 nginx)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo bash tests/e2e/run.sh
+      - run: docker build -q -t panel-debian12 -f tests/e2e/debian12.Dockerfile tests/e2e
+      - run: >
+          docker run -d --name deb --privileged --cgroupns=host
+          -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock panel-debian12
+      - run: |
+          docker cp . deb:/opt/vps-traffic-panel-src
+          for _ in $(seq 1 60); do
+            state=$(docker exec deb systemctl is-system-running 2>/dev/null || true)
+            case "$state" in running|degraded) break ;; esac
+            sleep 1
+          done
+          echo "systemd: $state"
+      - run: docker exec deb bash /opt/vps-traffic-panel-src/tests/e2e/run.sh

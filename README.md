@@ -347,10 +347,19 @@ pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-端到端測試（會真的安裝 Nginx 與 systemd 服務，**只在用完即丟的機器上跑**，CI 每次都會跑）：
+端到端測試（會真的安裝 Nginx 與 systemd 服務，**只在用完即丟的機器上跑**）：
 
 ```bash
-sudo bash tests/e2e/run.sh
+sudo bash tests/e2e/run.sh          # Nginx HTTPS 模式：安裝、續期、切換證書、升級、卸載
+sudo bash tests/e2e/run_direct.sh   # 直連 HTTPS 模式
+```
+
+CI 每次都會在 Ubuntu 24.04、Ubuntu 22.04、Debian 12（容器內的 systemd）上跑 Nginx 模式，並在 Ubuntu 24.04 上跑直連 HTTPS 模式；另外檢查 `panel.css` 是否與模板一致。
+
+修改模板或 `static/panel.js` 裡的 class 後，重新產生 CSS：
+
+```bash
+npx tailwindcss@3.4.16 -c tailwind.config.js -i app/static/src/panel.input.css -o app/static/panel.css --minify
 ```
 
 本機運行（資料放在獨立目錄，不影響專案目錄）：
@@ -365,16 +374,22 @@ VPS_PANEL_DATA_DIR=/tmp/panel-data uvicorn app.main:app --port 8088
 
 ```
 app/
-  main.py        API、整合（Telegram / Cloudflare / Bandwagon）、背景任務
-  collector.py   每秒讀取 /proc/net/dev，按小時彙總
-  database.py    SQLite
-  timeutil.py    面板時區
-  config.py      讀取 .env
-  templates/     前端頁面
-  static/        前端靜態資源
-panel.sh         一鍵管理選單（vps-panel）
-scripts/         安裝 / 升級 / 卸載 / 證書續期監看
-tests/           pytest 與端到端測試
+  main.py          組裝應用：啟動 / 關閉背景任務、CSRF 防護、掛載路由
+  config.py        讀取 .env；執行中的設定都以 config.NAME 讀寫
+  routes/          HTTP 端點：pages（登入）、settings、traffic、bandwagon、certs
+  auth.py          登入：工作階段 Cookie、Basic Auth、防爆破
+  traffic.py       計費週期、流量統計、配額、用量預警、VPS 到期提醒
+  bandwagon.py     搬瓦工 API：服務資訊、機房、遷移追蹤
+  ddns.py          Cloudflare DDNS
+  telegram.py      Telegram 通知與每日報告
+  ssl_status.py    目前證書、證書到期提醒、與 root 證書助手溝通
+  collector.py     每秒讀取 /proc/net/dev，按小時彙總，補回停機期間流量
+  net.py system.py envfile.py util.py sessions.py passwords.py sslinfo.py timeutil.py database.py
+  templates/       index.html、login.html 與 partials/（各個彈窗）
+  static/          panel.js、panel.css（由 Tailwind 預先產生）
+panel.sh           一鍵管理選單（vps-panel）
+scripts/           安裝 / 升級 / 卸載、證書續期監看與切換（root 助手）
+tests/             pytest 與端到端測試（tests/e2e）
 ```
 
 ## 更新日誌
