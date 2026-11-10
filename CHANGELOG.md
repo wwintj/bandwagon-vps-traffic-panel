@@ -2,7 +2,7 @@
 
 ## v1.2.0 — 2026-11-10
 
-把獨立的 [cloudflare-ddns-banwagon-vps](https://github.com/wwintj/cloudflare-ddns-banwagon-vps) 腳本的優點併入面板內建的 Cloudflare DDNS，之後只需要面板一個就夠了。
+把獨立的 `cloudflare-ddns-banwagon-vps` 腳本的優點併入面板內建的 Cloudflare DDNS，之後只需要面板一個就夠了。
 
 ### 新增
 - **不用再找 Zone ID**：只填 API Token 與完整域名即可，面板自動偵測所屬 Zone；也可以填主網域或 Zone ID。

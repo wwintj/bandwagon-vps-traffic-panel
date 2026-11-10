@@ -194,7 +194,7 @@ sudo /opt/vps-traffic-panel/scripts/uninstall.sh --keep-data   # 卸載並備份
 
 #### 從獨立的 cloudflare-ddns 腳本改用面板
 
-如果之前裝過 [cloudflare-ddns-banwagon-vps](https://github.com/wwintj/cloudflare-ddns-banwagon-vps)（`cf-ddns.timer`），兩個同時運行會重複更新同一筆記錄。在面板裡設定好 DDNS 並點「立即同步」確認成功後，移除舊腳本：
+如果之前裝過 `cloudflare-ddns-banwagon-vps`（`cf-ddns.timer`），兩個同時運行會重複更新同一筆記錄。在面板裡設定好 DDNS 並點「立即同步」確認成功後，移除舊腳本：
 
 ```bash
 bash /opt/vps-traffic-panel/scripts/legacy-check.sh remove
