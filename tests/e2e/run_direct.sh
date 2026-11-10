@@ -24,6 +24,9 @@ VPS_PANEL_CERT="$FIRST/fullchain.pem" VPS_PANEL_KEY="$FIRST/private.key" VPS_PAN
 grep -q '^HTTPS_MODE=uvicorn$' /opt/vps-traffic-panel/.env || die "expected direct HTTPS mode"
 [ "$(systemctl show -p User --value vps-traffic-panel)" = root ] || die "direct HTTPS mode should run as root (it reads the key)"
 [ "$(stat -c %U /opt/vps-traffic-panel/.env)" = root ] || die ".env should stay root-owned in direct mode"
+# the CI checkout belongs to the runner user; the installed copy must still be root's
+[ "$(stat -c %U /opt/vps-traffic-panel)" = root ] || die "install dir should be root-owned in direct mode"
+[ "$(stat -c %U /opt/vps-traffic-panel/app/main.py)" = root ] || die "installed code should be root-owned in direct mode"
 check "direct HTTPS mode, running as root"
 
 code=$(api /api/ping -o /dev/null -w '%{http_code}')

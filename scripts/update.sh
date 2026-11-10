@@ -76,7 +76,7 @@ main() {
     fi
 
     echo -e "${YELLOW}Syncing application files...${RESET}"
-    rsync -a --delete \
+    rsync -a --no-owner --no-group --delete \
         --exclude={'.git','.github','tests','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} \
         "$SOURCE_DIR/" "$INSTALL_DIR/"
 

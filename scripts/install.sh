@@ -679,9 +679,11 @@ if [ "$HTTPS_MODE" = "nginx" ]; then
     install_nginx_safely
 fi
 
+# Copied files belong to root, whoever owns the checkout; the Nginx path hands the tree to the
+# service user below, and in direct-HTTPS mode the root-run panel must not run user-owned code.
 info "Copying project files..."
 mkdir -p "$INSTALL_DIR"
-rsync -a --exclude={'.git','.github','tests','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} "$PROJECT_ROOT/" "$INSTALL_DIR/"
+rsync -a --no-owner --no-group --exclude={'.git','.github','tests','venv','__pycache__','*.db','*.db-shm','*.db-wal','.env','.env.example','backups','*.bak'} "$PROJECT_ROOT/" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR"/scripts/*.sh
 
 cd "$INSTALL_DIR"
