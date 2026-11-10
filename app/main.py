@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import logging
 import tempfile
 
-from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS
+from app.config import AUTH_USERNAME, AUTH_PASSWORD, BASE_DIR, ENV_PATH, MONTH_RESET_DAY, PANEL_TITLE, PANEL_SUBTITLE, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PUSH_HOUR, TELEGRAM_PUSH_MINUTE, TELEGRAM_TIMEZONE_OFFSET, TELEGRAM_TIMEZONE_LABEL, BANDWAGON_VEID, BANDWAGON_API_KEY, TRAFFIC_QUOTA_BYTES, CLOUDFLARE_DDNS_ENABLED, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_RECORD_NAME, CLOUDFLARE_PROXIED, CLOUDFLARE_DDNS_INTERVAL, CLOUDFLARE_TTL, CLOUDFLARE_DDNS_NOTIFY, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE
 from app.database import init_db, get_db, get_meta_value, set_meta_value
 from app.collector import collector_instance
 from app import timeutil
@@ -193,6 +193,20 @@ def get_next_cycle_start(now):
 
 def days_until(reset_date, today):
     return max(0, (reset_date - today).days)
+
+def parse_expiry_date(value):
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+def get_vps_expiry(today=None):
+    """Days until the VPS expires; negative once it has expired. None when no date is set."""
+    expiry = parse_expiry_date(VPS_EXPIRY_DATE)
+    if not expiry:
+        return None
+    today = today or timeutil.now().date()
+    return {"date": expiry.isoformat(), "days_left": (expiry - today).days}
 
 def format_meta_time(value):
     if not value:
@@ -497,6 +511,7 @@ def get_traffic_summary(pending=None):
         "total_since": format_meta_time(get_meta_value("install_time", ""))
     }
     summary["traffic_quota"] = get_traffic_quota_summary(summary)
+    summary["vps_expiry"] = get_vps_expiry(now.date())
     return summary
 
 def fetch_bandwagon_info():
@@ -1097,6 +1112,13 @@ def build_telegram_message(pending=None):
         f"上傳        <b>{format_bytes(summary['month_tx'])}</b>",
         f"重置日      每月 {summary['month_reset_day']} 日",
         f"距離重置    {days_until(get_next_cycle_start(configured_now()).date(), configured_now().date())} 天",
+    ]
+    expiry = get_vps_expiry(configured_now().date())
+    if expiry:
+        days = expiry["days_left"]
+        state = f"已過期 {-days} 天" if days < 0 else f"<b>{days} 天</b>" if days <= 7 else f"{days} 天"
+        lines.append(f"VPS 到期    {state}（{expiry['date']}）")
+    lines += [
         "",
         "<b>今日流量</b>",
         f"下載        {format_bytes(summary['today_rx'])}",
@@ -1489,6 +1511,7 @@ async def api_get_traffic_quota(username: str = Depends(verify_auth)):
         "traffic_quota_bytes": TRAFFIC_QUOTA_BYTES,
         "bandwagon_available": bool(bw and not bw.get("error") and bw.get("limit")),
         "bandwagon_error": bw.get("error") if bw and bw.get("error") else "",
+        "vps_expiry_date": VPS_EXPIRY_DATE,
         "traffic_alert_enabled": TRAFFIC_ALERT_ENABLED == "1",
         "traffic_alert_thresholds": ",".join(str(t) for t in parse_alert_thresholds(TRAFFIC_ALERT_THRESHOLDS)),
         "telegram_ready": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -1496,7 +1519,7 @@ async def api_get_traffic_quota(username: str = Depends(verify_auth)):
 
 @app.post("/api/traffic-quota")
 async def api_update_traffic_quota(payload: dict, username: str = Depends(verify_auth)):
-    global TRAFFIC_QUOTA_BYTES, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS
+    global TRAFFIC_QUOTA_BYTES, TRAFFIC_ALERT_ENABLED, TRAFFIC_ALERT_THRESHOLDS, VPS_EXPIRY_DATE
 
     try:
         quota_bytes = int(payload.get("traffic_quota_bytes", 0))
@@ -1516,6 +1539,14 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
         TRAFFIC_ALERT_THRESHOLDS = ",".join(str(t) for t in thresholds) or "80,90,100"
         updates["TRAFFIC_ALERT_THRESHOLDS"] = TRAFFIC_ALERT_THRESHOLDS
 
+    if "vps_expiry_date" in payload:
+        raw = str(payload.get("vps_expiry_date") or "").strip()
+        expiry = parse_expiry_date(raw)
+        if raw and not expiry:
+            raise HTTPException(status_code=400, detail="Invalid expiry date, use YYYY-MM-DD")
+        VPS_EXPIRY_DATE = expiry.isoformat() if expiry else ""
+        updates["VPS_EXPIRY_DATE"] = VPS_EXPIRY_DATE
+
     TRAFFIC_QUOTA_BYTES = quota_bytes
     update_env_values(updates)
     summary = await run_blocking(get_traffic_summary, collector_instance.snapshot_pending())
@@ -1523,6 +1554,7 @@ async def api_update_traffic_quota(payload: dict, username: str = Depends(verify
         "ok": True,
         "traffic_quota_bytes": TRAFFIC_QUOTA_BYTES,
         "traffic_quota": summary.get("traffic_quota", {}),
+        "vps_expiry": summary.get("vps_expiry"),
     }
 
 @app.get("/api/realtime")

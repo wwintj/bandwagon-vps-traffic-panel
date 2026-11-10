@@ -64,7 +64,10 @@
                     <span id="traffic-quota-detail" class="ml-auto whitespace-nowrap font-mono text-slate-300">未設定</span>
                 </div>
                 <div id="traffic-quota-track" class="progress-track mt-1.5 hidden"><div class="progress-fill bg-emerald-400" id="traffic-quota-bar"></div></div>
-                <p id="traffic-quota-reset" class="mt-1 text-[10px] text-slate-500 hidden"></p>
+                <div class="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+                    <span id="traffic-quota-reset" class="whitespace-nowrap hidden"></span>
+                    <span id="vps-expiry" class="whitespace-nowrap hidden"></span>
+                </div>
             </div>
         </div>
         <div class="card border-t-4 border-t-violet-400">
@@ -229,6 +232,10 @@
                         </select>
                     </label>
                 </div>
+                <label class="block text-xs text-slate-400 uppercase">VPS 到期日（可留空）
+                    <input id="vps-expiry-date" type="date" class="form-input font-mono">
+                    <span class="mt-1 block normal-case text-[11px] text-slate-500">搬瓦工 API 不提供到期日，請到 KiwiVM / 帳單頁查看後填入；續費後記得更新。</span>
+                </label>
                 <div class="border-t border-slate-700 pt-4 space-y-3">
                     <label class="flex items-center gap-2 text-sm text-slate-300">
                         <input id="traffic-alert-enabled" type="checkbox" class="h-4 w-4 accent-amber-400">
@@ -452,7 +459,7 @@
             const detail = document.getElementById('traffic-quota-detail');
             const resetEl = document.getElementById('traffic-quota-reset');
             if (quota.days_left !== null && quota.days_left !== undefined && quota.reset_date) {
-                resetEl.textContent = `距離重置 ${quota.days_left} 天（${quota.reset_date.slice(5)}）`;
+                resetEl.textContent = `距離重置 ${quota.days_left} 天（${quota.reset_date}）`;
                 resetEl.classList.remove('hidden');
             } else {
                 resetEl.classList.add('hidden');
@@ -489,6 +496,19 @@
             // Judge by the 5-minute average relative to core count, so a short spike doesn't flash red.
             const ratio = load[1] / Math.max(1, Number(cores) || 1);
             el.className = `mt-0.5 font-mono whitespace-nowrap ${ratio >= 2 ? 'text-red-400' : ratio >= 1 ? 'text-amber-400' : 'text-slate-500'}`;
+        }
+
+        function renderVpsExpiry(expiry) {
+            const el = document.getElementById('vps-expiry');
+            if (!expiry || !expiry.date) {
+                el.classList.add('hidden');
+                return;
+            }
+            const days = Number(expiry.days_left);
+            el.textContent = days < 0
+                ? `已過期 ${-days} 天（${expiry.date}）`
+                : days === 0 ? `今天到期（${expiry.date}）` : `距離到期 ${days} 天（${expiry.date}）`;
+            el.className = `whitespace-nowrap ${days <= 3 ? 'text-red-400 font-semibold' : days <= 7 ? 'text-amber-400' : ''}`;
         }
 
         function formatCoordinates(lat, lon) {
@@ -1052,6 +1072,7 @@
                 document.getElementById('reset-day').innerText = `每月 ${data.month_reset_day} 日重置`;
                 document.getElementById('reset-day-select').value = String(data.month_reset_day);
                 renderTrafficQuota(data.traffic_quota);
+                renderVpsExpiry(data.vps_expiry);
             } catch (e) {
                 console.error("Error fetching /api/summary:", e);
             }
@@ -1100,6 +1121,7 @@
                     ? '已檢測到 Bandwagon 官方 API，面板會優先使用官方配額。'
                     : `未檢測到 Bandwagon 官方配額，將使用手動配額。${data.bandwagon_error ? `原因：${data.bandwagon_error}` : ''}`;
                 document.getElementById('traffic-alert-enabled').checked = data.traffic_alert_enabled !== false;
+                document.getElementById('vps-expiry-date').value = data.vps_expiry_date || '';
                 document.getElementById('traffic-alert-thresholds').value = data.traffic_alert_thresholds || '80,90,100';
                 document.getElementById('traffic-alert-hint').innerText = data.telegram_ready
                     ? '每個門檻在一個計費週期內只提醒一次，重置後重新計算。'
@@ -1120,18 +1142,20 @@
                     body: JSON.stringify({
                         traffic_quota_bytes: quotaBytes,
                         traffic_alert_enabled: document.getElementById('traffic-alert-enabled').checked,
-                        traffic_alert_thresholds: document.getElementById('traffic-alert-thresholds').value
+                        traffic_alert_thresholds: document.getElementById('traffic-alert-thresholds').value,
+                        vps_expiry_date: document.getElementById('vps-expiry-date').value
                     })
                 });
                 if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
                 const data = await res.json();
                 renderTrafficQuota(data.traffic_quota);
+                renderVpsExpiry(data.vps_expiry);
                 status.innerText = '已保存。';
                 await fetchTrafficQuotaSettings();
                 await fetchSummary();
                 closeModal('traffic-quota-modal');
             } catch (e) {
-                status.innerText = `保存失敗：${e.message.includes('threshold') ? '提醒門檻請填 1–200 之間的數字，用逗號分隔' : '請檢查流量配額'}`;
+                status.innerText = `保存失敗：${e.message.includes('threshold') ? '提醒門檻請填 1–200 之間的數字，用逗號分隔' : e.message.includes('expiry') ? '到期日格式不正確' : '請檢查流量配額'}`;
                 console.error("Error saving /api/traffic-quota:", e);
             }
         }

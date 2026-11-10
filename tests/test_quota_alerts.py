@@ -147,3 +147,51 @@ def test_quota_settings_round_trip(m, client, auth, post_headers, monkeypatch):
     assert data["traffic_alert_thresholds"] == "70,95" and data["traffic_alert_enabled"] is True
     bad = dict(payload, traffic_alert_thresholds="abc")
     assert client.post("/api/traffic-quota", headers=post_headers, json=bad).status_code == 400
+
+
+# ---- VPS expiry -------------------------------------------------------------
+
+@pytest.mark.parametrize("value, today, expected", [
+    ("", date(2026, 11, 11), None),
+    ("not-a-date", date(2026, 11, 11), None),
+    ("2027-01-25", date(2026, 11, 11), 75),
+    ("2026-11-11", date(2026, 11, 11), 0),
+    ("2026-11-01", date(2026, 11, 11), -10),
+])
+def test_vps_expiry_days(m, monkeypatch, value, today, expected):
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", value)
+    result = m.get_vps_expiry(today)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == {"date": value, "days_left": expected}
+
+
+def test_summary_includes_expiry(m, monkeypatch):
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", "2099-01-01")
+    assert m.get_traffic_summary({})["vps_expiry"]["date"] == "2099-01-01"
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", "")
+    assert m.get_traffic_summary({})["vps_expiry"] is None
+
+
+def test_daily_report_shows_expiry(m, monkeypatch):
+    monkeypatch.setattr(m, "fetch_bandwagon_info", lambda: None)
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", (timeutil.now().date().replace(year=timeutil.now().year + 1)).isoformat())
+    assert "VPS 到期" in m.build_telegram_message({})
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", "2000-01-01")
+    assert "已過期" in m.build_telegram_message({})
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", "")
+    assert "VPS 到期" not in m.build_telegram_message({})
+
+
+def test_expiry_date_settings(m, client, auth, post_headers, monkeypatch):
+    monkeypatch.setattr(m, "update_env_values", lambda updates: None)
+    monkeypatch.setattr(m, "VPS_EXPIRY_DATE", m.VPS_EXPIRY_DATE)
+    monkeypatch.setattr(m, "TRAFFIC_QUOTA_BYTES", m.TRAFFIC_QUOTA_BYTES)
+    base = {"traffic_quota_bytes": 0}
+    r = client.post("/api/traffic-quota", headers=post_headers, json=dict(base, vps_expiry_date="2027-01-25"))
+    assert r.status_code == 200 and r.json()["vps_expiry"]["date"] == "2027-01-25"
+    assert client.get("/api/traffic-quota", headers=auth).json()["vps_expiry_date"] == "2027-01-25"
+    assert client.post("/api/traffic-quota", headers=post_headers, json=dict(base, vps_expiry_date="25/01/2027")).status_code == 400
+    r = client.post("/api/traffic-quota", headers=post_headers, json=dict(base, vps_expiry_date=""))
+    assert r.status_code == 200 and r.json()["vps_expiry"] is None
